@@ -3216,8 +3216,29 @@ Value Context::materializeConversion(Type type, Value value, bool isSigned,
                                                                    value);
     }
   }
-  // Convert from fixed-size unpacked array to open unpacked array
+  // Assignment-compatible unpacked arrays can have different packed element
+  // representations, for example an array of packed structs and an array of
+  // bit vectors. Convert each element recursively to also handle nested arrays.
   auto srcUArray = dyn_cast<moore::UnpackedArrayType>(value.getType());
+  auto dstUArray = dyn_cast<moore::UnpackedArrayType>(type);
+  if (srcUArray && dstUArray && srcUArray.getSize() == dstUArray.getSize()) {
+    SmallVector<Value> elements;
+    elements.reserve(srcUArray.getSize());
+    // Array creation lists elements from most to least significant, whereas
+    // extract offsets count from the least significant element.
+    for (unsigned i = srcUArray.getSize(); i > 0; --i) {
+      Value element = moore::ExtractOp::create(
+          builder, loc, srcUArray.getElementType(), value, i - 1);
+      element = materializeConversion(dstUArray.getElementType(), element,
+                                      isSigned, loc, fallible);
+      if (!element)
+        return {};
+      elements.push_back(element);
+    }
+    return moore::ArrayCreateOp::create(builder, loc, dstUArray, elements);
+  }
+
+  // Convert from fixed-size unpacked array to open unpacked array
   auto dstOpenUArray = dyn_cast<moore::OpenUnpackedArrayType>(type);
   if (srcUArray && dstOpenUArray) {
     auto openUnpackedArrayElType = dstOpenUArray.getElementType();
