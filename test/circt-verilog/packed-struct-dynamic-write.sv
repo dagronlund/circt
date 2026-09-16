@@ -50,3 +50,20 @@ module crossing(input logic [4:0] index, input logic [7:0] data,
   end
   assign result = word_value;
 endmodule
+
+// Nested structs and packed arrays must both be flattened to integer leaves.
+// DEFAULT-LABEL: hw.module @nested_insert(
+// CHECK-LABEL: hw.module @nested_insert(
+// CHECK-NOT: llhd.
+// CHECK-NOT: seq.
+// CHECK: hw.output
+module nested_insert(input logic [31:0] data, input int index,
+                     output logic [95:0] result);
+  typedef struct packed {logic [15:0] upper, lower;} inner_t;
+  typedef struct packed {inner_t a; inner_t b; logic [3:0][7:0] c;} word_t;
+  function automatic word_t insert_word(logic [31:0] value, int offset);
+    insert_word = 'x;
+    insert_word[offset * 32 +: 32] = value;
+  endfunction
+  assign result = insert_word(data, index);
+endmodule

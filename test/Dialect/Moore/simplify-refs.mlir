@@ -250,3 +250,29 @@ moore.module @PackedStructDynamicExtract() {
   }
   moore.output
 }
+
+// CHECK-LABEL: moore.module @PackedStructArrayExtract()
+// A slice spanning array elements uses bit offsets within each integer leaf,
+// while projections through the array use element indices.
+moore.module @PackedStructArrayExtract() {
+  %word = moore.variable : <struct<{a: array<2 x array<2 x i4>>}>>
+  moore.procedure initial {
+    // CHECK: [[SRC:%.+]] = moore.constant 0 : i6
+    %src = moore.constant 0 : i6
+    %slice = moore.extract_ref %word from 2 : <struct<{a: array<2 x array<2 x i4>>}>> -> <i6>
+    // CHECK: [[ARRAY:%.+]] = moore.struct_extract_ref %word, "a"
+    // CHECK: [[OUTER0:%.+]] = moore.extract_ref [[ARRAY]] from 0 : <array<2 x array<2 x i4>>> -> <array<2 x i4>>
+    // CHECK: [[INNER0:%.+]] = moore.extract_ref [[OUTER0]] from 0 : <array<2 x i4>> -> <i4>
+    // CHECK: [[INNER1:%.+]] = moore.extract_ref [[OUTER0]] from 1 : <array<2 x i4>> -> <i4>
+    // CHECK: moore.extract_ref [[ARRAY]] from 1
+    // CHECK: [[LOW:%.+]] = moore.extract_ref [[INNER0]] from 2 : <i4> -> <i2>
+    // CHECK: [[HIGH:%.+]] = moore.extract_ref [[INNER1]] from 0 : <i4> -> <i4>
+    // CHECK: [[HIGH_SRC:%.+]] = moore.extract [[SRC]] from 2 : i6 -> i4
+    // CHECK: moore.blocking_assign [[HIGH]], [[HIGH_SRC]] : i4
+    // CHECK: [[LOW_SRC:%.+]] = moore.extract [[SRC]] from 0 : i6 -> i2
+    // CHECK: moore.blocking_assign [[LOW]], [[LOW_SRC]] : i2
+    moore.blocking_assign %slice, %src : i6
+    moore.return
+  }
+  moore.output
+}
