@@ -210,3 +210,43 @@ moore.module @PackedStructExtractRange() {
     moore.return
   }
 }
+
+// CHECK-LABEL: moore.module @PackedStructDynamicExtract()
+// Keep the index and RHS evaluated once, guard each destination bit, and
+// preserve delayed nonblocking assignments (including their delay operand).
+moore.module @PackedStructDynamicExtract() {
+  %word = moore.variable : <struct<{upper: i1, lower: l1}>>
+  %index = moore.variable : <l2>
+  %data = moore.variable : <l1>
+  moore.procedure always {
+    %idx = moore.read %index : <l2>
+    %src = moore.read %data : <l1>
+    // CHECK: [[DELAY:%.+]] = moore.constant_time 3000000 fs
+    %delay = moore.constant_time 3000000 fs
+    %slice = moore.dyn_extract_ref %word from %idx : <struct<{upper: i1, lower: l1}>>, !moore.l2 -> <l1>
+    // CHECK: [[LO:%.+]] = moore.struct_extract_ref %word, "lower"
+    // CHECK: [[HI:%.+]] = moore.struct_extract_ref %word, "upper"
+    // CHECK: [[INDEX:%.+]] = moore.zext %{{.+}} : l2 -> l3
+    // CHECK: [[ZERO:%.+]] = moore.constant 0 : l3
+    // CHECK: [[OFFSET:%.+]] = moore.sub [[ZERO]], [[INDEX]] : l3
+    // CHECK: [[WIDTH:%.+]] = moore.constant 1 : l3
+    // CHECK: [[IN_RANGE:%.+]] = moore.ult [[OFFSET]], [[WIDTH]] : l3
+    // CHECK: [[BOOL:%.+]] = moore.logic_to_int [[IN_RANGE]] : l1
+    // CHECK: [[ENABLE:%.+]] = moore.to_builtin_int [[BOOL]] : i1
+    // CHECK: scf.if [[ENABLE]] {
+    // CHECK: [[DST:%.+]] = moore.extract_ref [[LO]] from 0 : <l1> -> <l1>
+    // CHECK: [[SRC:%.+]] = moore.dyn_extract %{{.+}} from [[OFFSET]] : l1, l3 -> l1
+    // CHECK: moore.delayed_nonblocking_assign [[DST]], [[SRC]], [[DELAY]] : l1
+    // CHECK: }
+    // CHECK: [[ONE:%.+]] = moore.constant 1 : l3
+    // CHECK: [[OFFSET:%.+]] = moore.sub [[ONE]], [[INDEX]] : l3
+    // CHECK: scf.if
+    // CHECK: [[DST:%.+]] = moore.extract_ref [[HI]] from 0 : <i1> -> <i1>
+    // CHECK: [[SRC:%.+]] = moore.dyn_extract %{{.+}} from [[OFFSET]] : l1, l3 -> l1
+    // CHECK: [[CONV:%.+]] = moore.logic_to_int [[SRC]] : l1
+    // CHECK: moore.delayed_nonblocking_assign [[DST]], [[CONV]], [[DELAY]] : i1
+    moore.delayed_nonblocking_assign %slice, %src, %delay : l1
+    moore.return
+  }
+  moore.output
+}

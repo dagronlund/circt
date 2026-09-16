@@ -46,6 +46,7 @@ def SimplifyRefs : Pass<"moore-simplify-refs"> {
       so it's best to get rid of them.
     }];
     let constructor = "circt::moore::createSimplifyRefsPass()";
+    let dependentDialects = ["mlir::scf::SCFDialect"];
 }
 
 def CreateVTables : Pass<"moore-create-vtables", "mlir::ModuleOp"> {

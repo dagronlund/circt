@@ -15,16 +15,18 @@
 // immediately has a value assigned via blocking assignment, replacing it with
 // moore.queue.set. Queue element references are tricky to lower into LLHD,
 // so it's best to get rid of them.
-// - To rewrite assignments to ExtractOp expressions on a packed struct,
+// - To rewrite assignments to static or dynamic extracts of a packed struct,
 // e.g. "s[7:0] = v", into an assignment to a concatenation of the struct's
-// (possibly further sliced) fields.
+// (possibly further sliced) fields, or guarded writes to individual field bits.
 //
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/Moore/MooreOps.h"
 #include "circt/Dialect/Moore/MoorePasses.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/Support/MathExtras.h"
 
 namespace circt {
 namespace moore {
@@ -225,6 +227,93 @@ struct StructExtractLowering : public OpConversionPattern<OpTy> {
   }
 };
 
+// Scatter a dynamic packed-struct slice into guarded writes to individual
+// field bits. Do not read-modify-write the whole struct: nonblocking
+// assignments to disjoint slices must not overwrite each other's updates.
+template <typename OpTy>
+struct StructDynExtractLowering : public OpConversionPattern<OpTy> {
+  using OpConversionPattern<OpTy>::OpConversionPattern;
+  using OpAdaptor = typename OpTy::Adaptor;
+
+  LogicalResult
+  matchAndRewrite(OpTy op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto extract = op.getDst().template getDefiningOp<DynExtractRefOp>();
+    if (!extract ||
+        !isa<StructType>(
+            cast<RefType>(extract.getInput().getType()).getNestedType()))
+      return failure();
+
+    auto loc = op.getLoc();
+    SmallVector<FieldInfo> fields;
+    if (failed(collectFields(extract.getInput(), fields, rewriter)))
+      return failure();
+    for (auto &field : fields)
+      if (!isa<IntType>(cast<RefType>(field.field.getType()).getNestedType()))
+        return rewriter.notifyMatchFailure(op,
+                                           "expected integer struct fields");
+
+    auto srcType = cast<IntType>(op.getSrc().getType());
+    auto indexType = cast<IntType>(extract.getLowBit().getType());
+    auto structWidth = cast<RefType>(extract.getInput().getType())
+                           .getNestedType()
+                           .getBitSize()
+                           .value();
+    // Keep the subtraction wide enough that an out-of-range index cannot
+    // wrap back into the source.
+    auto wideType = IntType::get(
+        rewriter.getContext(),
+        std::max(indexType.getWidth(),
+                 unsigned(llvm::Log2_64_Ceil(
+                     std::max(structWidth, srcType.getWidth()) + 1))) +
+            1,
+        indexType.getDomain());
+    Value index = ZExtOp::create(rewriter, loc, wideType, extract.getLowBit());
+    auto srcBitType =
+        IntType::get(rewriter.getContext(), 1, srcType.getDomain());
+    for (auto &field : fields) {
+      auto fieldType =
+          cast<IntType>(cast<RefType>(field.field.getType()).getNestedType());
+      auto bitType =
+          IntType::get(rewriter.getContext(), 1, fieldType.getDomain());
+      for (unsigned bit = 0; bit < field.size; ++bit) {
+        // A destination bit participates exactly when its offset relative to
+        // the start of the slice is within the source. Constant destination
+        // references also let signal promotion eliminate combinational storage.
+        Value offset = SubOp::create(
+            rewriter, loc,
+            ConstantOp::create(rewriter, loc, wideType, field.offset + bit),
+            index);
+        Value enabled = UltOp::create(
+            rewriter, loc, offset,
+            ConstantOp::create(rewriter, loc, wideType, srcType.getWidth()));
+        if (indexType.getDomain() == Domain::FourValued)
+          enabled = LogicToIntOp::create(rewriter, loc, enabled);
+        enabled = ToBuiltinIntOp::create(rewriter, loc, enabled);
+        auto ifOp = scf::IfOp::create(rewriter, loc, enabled, false);
+        {
+          OpBuilder::InsertionGuard guard(rewriter);
+          rewriter.setInsertionPointToStart(ifOp.thenBlock());
+          Value dst = ExtractRefOp::create(rewriter, loc, RefType::get(bitType),
+                                           field.field, bit);
+          Value src = DynExtractOp::create(rewriter, loc, srcBitType,
+                                           op.getSrc(), offset);
+          if (bitType != srcBitType)
+            src = bitType.getDomain() == Domain::FourValued
+                      ? Value(IntToLogicOp::create(rewriter, loc, src))
+                      : Value(LogicToIntOp::create(rewriter, loc, src));
+          IRMapping mapping;
+          mapping.map(op.getDst(), dst);
+          mapping.map(op.getSrc(), src);
+          rewriter.clone(*op.getOperation(), mapping);
+        }
+      }
+    }
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 struct QueueRefLowering : public OpConversionPattern<DynQueueRefElementOp> {
   using OpConversionPattern<DynQueueRefElementOp>::OpConversionPattern;
 
@@ -323,6 +412,24 @@ void SimplifyRefsPass::runOnOperation() {
 
   if (failed(applyFullConversion(getOperation(), target,
                                  std::move(extractRefOnStructPatterns)))) {
+    signalPassFailure();
+    return;
+  }
+
+  target.addDynamicallyLegalOp<BlockingAssignOp, NonBlockingAssignOp,
+                               DelayedNonBlockingAssignOp>([](auto op) {
+    auto extract = op->getOperand(0).template getDefiningOp<DynExtractRefOp>();
+    return !extract ||
+           !isa<StructType>(
+               cast<RefType>(extract.getInput().getType()).getNestedType());
+  });
+  RewritePatternSet dynamicExtractPatterns(&context);
+  dynamicExtractPatterns
+      .add<StructDynExtractLowering<BlockingAssignOp>,
+           StructDynExtractLowering<NonBlockingAssignOp>,
+           StructDynExtractLowering<DelayedNonBlockingAssignOp>>(&context);
+  if (failed(applyFullConversion(getOperation(), target,
+                                 std::move(dynamicExtractPatterns)))) {
     signalPassFailure();
     return;
   }

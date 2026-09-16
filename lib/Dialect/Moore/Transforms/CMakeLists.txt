@@ -11,5 +11,6 @@ CreateVTables.cpp
   CIRCTSupport
   MLIRIR
   MLIRPass
+  MLIRSCFDialect
   MLIRTransformUtils
 )
