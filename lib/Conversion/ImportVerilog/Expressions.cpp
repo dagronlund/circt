@@ -2189,6 +2189,63 @@ struct RvalueExprVisitor : public ExprVisitor {
       return fmtValue.value();
     }
 
+    // Reduce fixed-size unpacked arrays in declaration order. The result has
+    // the element type, or the type of the optional `with` expression; the
+    // surrounding expression must not widen the individual reduction steps.
+    if (nameId == ksn::Sum || nameId == ksn::Product || nameId == ksn::And ||
+        nameId == ksn::Or || nameId == ksn::XOr) {
+      auto array = context.convertRvalueExpression(*args[0]);
+      if (!array)
+        return {};
+      auto arrayType = dyn_cast<moore::UnpackedArrayType>(array.getType());
+      if (!arrayType) {
+        mlir::emitError(loc) << "array reduction method `" << subroutine.name
+                             << "` requires a fixed-size unpacked array";
+        return {};
+      }
+      auto [iterExpr, iterVar] = info.getIteratorInfo();
+      Value result;
+      for (unsigned i = arrayType.getSize(); i > 0; --i) {
+        Value element = moore::ExtractOp::create(
+            builder, loc, arrayType.getElementType(), array, i - 1);
+        if (iterExpr) {
+          Context::ValueSymbolScope scope(context.valueSymbols);
+          context.valueSymbols.insert(iterVar, element);
+          element = context.convertRvalueExpression(*iterExpr);
+          if (!element)
+            return {};
+        }
+        element = context.convertToSimpleBitVector(element);
+        if (!element)
+          return {};
+        if (!result) {
+          result = element;
+          continue;
+        }
+        switch (nameId) {
+        case ksn::Sum:
+          result = moore::AddOp::create(builder, loc, result, element);
+          break;
+        case ksn::Product:
+          result = moore::MulOp::create(builder, loc, result, element);
+          break;
+        case ksn::And:
+          result = moore::AndOp::create(builder, loc, result, element);
+          break;
+        case ksn::Or:
+          result = moore::OrOp::create(builder, loc, result, element);
+          break;
+        case ksn::XOr:
+          result = moore::XorOp::create(builder, loc, result, element);
+          break;
+        default:
+          llvm_unreachable("unexpected array reduction method");
+        }
+      }
+      return context.materializeConversion(context.convertType(*expr.type),
+                                           result, expr.type->isSigned(), loc);
+    }
+
     // Convert the system call using unified dispatch
     auto result = context.convertSystemCall(subroutine, loc, args);
     if (!result)
