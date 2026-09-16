@@ -995,46 +995,55 @@ struct StmtVisitor {
   LogicalResult visit(const slang::ast::ConcurrentAssertionStatement &stmt) {
     auto loc = context.convertLocation(stmt.sourceRange);
 
-    // Check for a `disable iff` expression:
-    // `disable iff` can only appear at the outermost property that is asserted,
-    // and can never be nested.
-    // Hence we only need to detect if the top level assertion expression has
-    // type DisableIff. (or, if the top level expression is
-    // ClockingAssertionExpr, check for DisableIff inside that).
-    Value enable;
-    Value property;
-    // Find the outermost propertySpec that isn't ClockingAssertionExpr
-    const slang::ast::AssertionExpr *propertySpec;
-    const slang::ast::ClockingAssertionExpr *clocking =
-        stmt.propertySpec.as_if<slang::ast::ClockingAssertionExpr>();
-    if (clocking)
-      propertySpec = &(clocking->expr);
-    else
-      propertySpec = &(stmt.propertySpec);
-
-    if (auto *disableIff =
-            propertySpec->as_if<slang::ast::DisableIffAssertionExpr>()) {
-      // Lower disableIff by negating it and passing as the "enable" operand
-      // to the verif.assert/verif.assume/verif.cover instructions.
-      auto disableCond = context.convertRvalueExpression(disableIff->condition);
-      auto enableCond = moore::NotOp::create(builder, loc, disableCond);
-
-      enable = context.convertToI1(enableCond);
-
-      // Add back the outer `ClockingAssertionExpr` if there is one.
-      if (clocking) {
-        auto clockingExpr = slang::ast::ClockingAssertionExpr(
-            clocking->clocking, disableIff->expr);
-        property = context.convertAssertionExpression(clockingExpr, loc);
-      } else {
-        property = context.convertAssertionExpression(disableIff->expr, loc);
+    // A disable condition belongs to the outermost asserted property, but
+    // named property instances can hide it beneath clocking and reference
+    // wrappers. Peel those wrappers before extracting the assertion enable.
+    const slang::ast::AssertionExpr *propertySpec = &stmt.propertySpec;
+    SmallVector<const slang::ast::ClockingAssertionExpr *> clocks;
+    while (true) {
+      if (auto *clock =
+              propertySpec->as_if<slang::ast::ClockingAssertionExpr>()) {
+        clocks.push_back(clock);
+        propertySpec = &clock->expr;
+        continue;
       }
-    } else {
-      property = context.convertAssertionExpression(stmt.propertySpec, loc);
+      if (auto *simple =
+              propertySpec->as_if<slang::ast::SimpleAssertionExpr>()) {
+        if (!simple->repetition) {
+          if (auto *instance =
+                  simple->expr
+                      .as_if<slang::ast::AssertionInstanceExpression>()) {
+            propertySpec = &instance->body;
+            continue;
+          }
+        }
+      }
+      break;
     }
 
+    Value enable;
+    if (auto *disableIff =
+            propertySpec->as_if<slang::ast::DisableIffAssertionExpr>()) {
+      // Lower disable iff to the enable operand of the verification operation.
+      auto disableCond = context.convertRvalueExpression(disableIff->condition);
+      if (!disableCond)
+        return failure();
+      auto enableCond = moore::NotOp::create(builder, loc, disableCond);
+      enable = context.convertToI1(enableCond);
+      if (!enable)
+        return failure();
+      propertySpec = &disableIff->expr;
+    }
+
+    auto property = context.convertAssertionExpression(*propertySpec, loc);
     if (!property)
       return failure();
+    // Restore clocks from the innermost wrapper to the outermost one.
+    for (auto *clock : llvm::reverse(clocks)) {
+      property = context.convertLTLTimingControl(clock->clocking, property);
+      if (!property)
+        return failure();
+    }
 
     // Handle assertion statements that don't have an action block.
     if (!stmt.ifTrue || stmt.ifTrue->as_if<slang::ast::EmptyStatement>()) {
