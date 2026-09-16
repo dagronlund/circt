@@ -493,6 +493,14 @@ struct StmtVisitor {
     if (!caseExpr)
       return failure();
 
+    // Case equality operates on simple bit vectors. Slang may leave packed
+    // arrays and structs in their aggregate representation on either side.
+    if (isa<moore::PackedType>(caseExpr.getType())) {
+      caseExpr = context.convertToSimpleBitVector(caseExpr);
+      if (!caseExpr)
+        return failure();
+    }
+
     // Check each case individually. This currently ignores the `unique`,
     // `unique0`, and `priority` modifiers which would allow for additional
     // optimizations.
@@ -524,6 +532,11 @@ struct StmtVisitor {
           if (!value)
             return failure();
           itemLoc = value.getLoc();
+          if (isa<moore::PackedType>(value.getType())) {
+            value = context.convertToSimpleBitVector(value);
+            if (!value)
+              return failure();
+          }
 
           // Take note if the expression is a constant.
           auto maybeConst = value;
