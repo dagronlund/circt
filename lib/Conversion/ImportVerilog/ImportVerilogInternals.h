@@ -439,6 +439,13 @@ struct Context {
       moore::IntFormat defaultFormat = moore::IntFormat::Decimal,
       bool appendNewline = false);
 
+  /// Convert the explicit format and value arguments of $sformat/$sformatf.
+  /// Unlike display tasks, these interpret expression-valued formats at
+  /// runtime.
+  FailureOr<Value>
+  convertSFormat(std::span<const slang::ast::Expression *const> arguments,
+                 Location loc);
+
   /// Result of converting a scan format string. The final cursor of the
   /// consuming chain and the list of (destination expression, scanned value,
   /// matched flag) tuples to assign

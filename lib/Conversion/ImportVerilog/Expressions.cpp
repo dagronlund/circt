@@ -2183,8 +2183,7 @@ struct RvalueExprVisitor : public ExprVisitor {
     // a StringType.
     if (nameId == ksn::SFormatF) {
       // Create the FormatString
-      auto fmtValue = context.convertFormatString(
-          expr.arguments(), loc, moore::IntFormat::Decimal, false);
+      auto fmtValue = context.convertSFormat(expr.arguments(), loc);
       if (failed(fmtValue))
         return {};
       return fmtValue.value();
@@ -3386,6 +3385,50 @@ emitScanAssignments(Context &context, const Context::ScanStringResult &result,
   return success();
 }
 
+/// Dynamic scan formats are interpreted by the simulator. Preserve the
+/// destination types and guard each write with the signed assignment count
+/// so that EOF (-1), mismatches, and partial scans leave destinations intact.
+static Value emitDynamicScan(Context &context, Value source,
+                             const slang::ast::Expression &formatExpr,
+                             ArrayRef<const slang::ast::Expression *> args,
+                             Location loc, bool isFile) {
+  auto &builder = context.builder;
+  auto format = context.convertRvalueExpression(
+      formatExpr, moore::StringType::get(context.getContext()));
+  if (!format)
+    return {};
+  SmallVector<const slang::ast::Expression *> destinations;
+  SmallVector<Type> types;
+  for (const auto *arg : args) {
+    if (auto *assignment = arg->as_if<slang::ast::AssignmentExpression>())
+      arg = &assignment->left();
+    auto type = context.convertType(*arg->type);
+    if (!type)
+      return {};
+    destinations.push_back(arg);
+    types.push_back(type);
+  }
+  auto countType = moore::IntType::getInt(context.getContext(), 32);
+  Operation *op;
+  if (isFile)
+    op = moore::FScanfDynamicBIOp::create(builder, loc, countType, types,
+                                          source, format);
+  else
+    op = moore::SScanfDynamicBIOp::create(builder, loc, countType, types,
+                                          source, format);
+  auto count = op->getResult(0);
+  Context::ScanStringResult assignments;
+  for (auto [index, dest] : llvm::enumerate(destinations)) {
+    auto threshold = moore::ConstantOp::create(builder, loc, countType, index);
+    auto matched = moore::SgtOp::create(builder, loc, count, threshold);
+    assignments.assignments.emplace_back(dest, op->getResult(index + 1),
+                                         matched);
+  }
+  if (failed(emitScanAssignments(context, assignments, loc)))
+    return {};
+  return count;
+}
+
 //===----------------------------------------------------------------------===//
 // Enum Built-in Method Helpers
 //===----------------------------------------------------------------------===//
@@ -4117,9 +4160,13 @@ Value Context::convertSystemCall(
       auto *strLit = args[1]
                          ->unwrapImplicitConversions()
                          .as_if<slang::ast::StringLiteral>();
-      if (!strLit)
-        return emitError(loc) << "$fopen mode must be a string literal",
-               Value{};
+      if (!strLit) {
+        auto mode = convertRvalueExpression(
+            *args[1], moore::StringType::get(getContext()));
+        if (!mode)
+          return {};
+        return moore::FOpenDynamicBIOp::create(builder, loc, filename, mode);
+      }
 
       auto mode =
           llvm::StringSwitch<std::optional<moore::FOpenMode>>(
@@ -4223,9 +4270,8 @@ Value Context::convertSystemCall(
     auto *fmtLit =
         args[1]->unwrapImplicitConversions().as_if<slang::ast::StringLiteral>();
     if (!fmtLit)
-      return (mlir::emitError(loc)
-              << "$fscanf requires a string literal format string"),
-             Value{};
+      return emitDynamicScan(*this, fd, *args[1], args.subspan(2), loc,
+                             /*isFile=*/true);
     auto cursor =
         moore::ScanBeginFScanFOp::create(builder, loc, fd).getCursor();
     auto result =
@@ -4246,9 +4292,8 @@ Value Context::convertSystemCall(
     auto *fmtLit =
         args[1]->unwrapImplicitConversions().as_if<slang::ast::StringLiteral>();
     if (!fmtLit)
-      return (mlir::emitError(loc)
-              << "$sscanf requires a string literal format string"),
-             Value{};
+      return emitDynamicScan(*this, str, *args[1], args.subspan(2), loc,
+                             /*isFile=*/false);
     auto cursor =
         moore::ScanBeginSScanFOp::create(builder, loc, str).getCursor();
     auto result =

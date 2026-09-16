@@ -229,6 +229,15 @@ public:
       return sv::RegOp::create(rewriter, loc, type);
     };
     SmallVector<Value> args(adaptor.getOperands());
+    if constexpr (std::is_same_v<OpTy, SFormatDynamicOp>) {
+      for (auto [index, isSigned] : llvm::enumerate(op.getIsSigned())) {
+        auto &value = args[index + 1];
+        if (isa<IntegerType>(value.getType()))
+          value = sv::SystemFunctionOp::create(rewriter, loc, value.getType(),
+                                               isSigned ? "signed" : "unsigned",
+                                               ValueRange{value});
+      }
+    }
     SmallVector<Value> temporaries;
     for (Type type : llvm::drop_begin(op->getResultTypes())) {
       type = this->getTypeConverter()->convertType(type);
@@ -1046,6 +1055,14 @@ struct SimToSVPass : public circt::impl::LowerSimToSVBase<SimToSVPass> {
           typeConverter, context, "test$plusargs");
       patterns.add<DynamicStringBuiltinLowering<PlusArgsValueDynamicOp>>(
           typeConverter, context, "value$plusargs");
+      patterns.add<DynamicStringBuiltinLowering<SScanfDynamicOp>>(
+          typeConverter, context, "sscanf");
+      patterns.add<DynamicStringBuiltinLowering<FScanfDynamicOp>>(
+          typeConverter, context, "fscanf");
+      patterns.add<DynamicStringBuiltinLowering<SFormatDynamicOp>>(
+          typeConverter, context, "sformatf");
+      patterns.add<DynamicStringBuiltinLowering<FOpenDynamicOp>>(
+          typeConverter, context, "fopen");
       patterns.add<StdoutStreamLowering>(typeConverter, context);
       patterns.add<StderrStreamLowering>(typeConverter, context);
       patterns.add<FlushLowering>(typeConverter, context);

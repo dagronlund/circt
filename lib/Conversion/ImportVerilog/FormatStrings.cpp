@@ -334,10 +334,12 @@ struct FormatStringParser {
   /// Emit an expression argument with the appropriate default formatting.
   LogicalResult emitDefault(const slang::ast::Expression &expr) {
     FormatOptions options;
-    // Without an explicit format string, default formatting is not limited to
-    // integers, the string-typed arguments also be concerned.
-    if (expr.type->isString())
+    // Computed implicit strings (including packed concatenations of literals)
+    // are message text, not format strings.
+    if (expr.isImplicitString())
       return emitString(expr, options);
+    if (expr.type->isFloating())
+      return emitReal(expr, options, RealFormat::Float);
     return emitInteger(expr, options, defaultFormat);
   }
 };
@@ -349,4 +351,33 @@ FailureOr<Value> Context::convertFormatString(
   FormatStringParser parser(*this, ArrayRef(arguments.data(), arguments.size()),
                             loc, defaultFormat);
   return parser.parse(appendNewline);
+}
+
+FailureOr<Value> Context::convertSFormat(
+    std::span<const slang::ast::Expression *const> arguments, Location loc) {
+  assert(!arguments.empty() && "$sformat/$sformatf requires a format");
+  if (arguments.front()->as_if<slang::ast::StringLiteral>())
+    return convertFormatString(arguments, loc);
+
+  auto format = convertRvalueExpression(*arguments.front(),
+                                        moore::StringType::get(getContext()));
+  if (!format)
+    return failure();
+  SmallVector<Value> values;
+  SmallVector<bool> isSigned;
+  for (const auto *arg : arguments.subspan(1)) {
+    auto type = convertType(*arg->type);
+    if (!type)
+      return failure();
+    auto value = convertRvalueExpression(*arg, type);
+    if (!value)
+      return failure();
+    values.push_back(value);
+    isSigned.push_back(arg->type->isIntegral() && arg->type->isSigned());
+  }
+  auto string = moore::SFormatDynamicBIOp::create(
+      builder, loc, format, values, builder.getDenseBoolArrayAttr(isSigned));
+  return moore::FormatStringOp::create(builder, loc, string, nullptr, nullptr,
+                                       nullptr)
+      .getResult();
 }

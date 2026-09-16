@@ -81,6 +81,44 @@ def PlusArgsValueDynamicOp : SimOp<"plusargs.value_dynamic", [ProceduralOp]> {
   let assemblyFormat = "$format attr-dict `:` type($result)";
 }
 
+class ScanDynamicOp<string mnemonic, Type sourceType> :
+    SimOp<mnemonic, [ProceduralOp]> {
+  let summary = "Scan input using a runtime format string";
+  let description = [{
+    Returns the number of successfully assigned destinations, or -1 on input
+    failure before the first conversion. Only that many leading results are
+    valid; the remaining results are unspecified. Suppressed conversions do
+    not consume a result or count as an assignment.
+  }];
+  let arguments = (ins sourceType:$source, DynamicStringType:$format);
+  let results = (outs I32:$count, Variadic<AnyType>:$values);
+  let assemblyFormat = "$source `,` $format attr-dict (`:` type($values)^)?";
+}
+
+def SScanfDynamicOp : ScanDynamicOp<"sv.sscanf_dynamic", DynamicStringType>;
+def FScanfDynamicOp : ScanDynamicOp<"sv.fscanf_dynamic", I32>;
+
+def SFormatDynamicOp : SimOp<"sv.sformat_dynamic", [ProceduralOp]> {
+  let summary = "Format a string using a runtime format expression";
+  let description = [{
+    Interprets `format` with the semantics of SystemVerilog `$sformatf`.
+    `isSigned` contains one flag per value, preserving integral signedness
+    for the simulation backend. Evaluation occurs at the procedural position.
+  }];
+  let arguments = (ins DynamicStringType:$format, Variadic<AnyType>:$values,
+                       DenseBoolArrayAttr:$isSigned);
+  let results = (outs DynamicStringType:$result);
+  let assemblyFormat = "$format `(` $values `)` attr-dict (`:` type($values)^)?";
+  let hasVerifier = 1;
+}
+
+def FOpenDynamicOp : SimOp<"sv.fopen_dynamic", [ProceduralOp]> {
+  let summary = "Open a file using a runtime mode string";
+  let arguments = (ins DynamicStringType:$filename, DynamicStringType:$mode);
+  let results = (outs I32:$fd);
+  let assemblyFormat = "$filename `,` $mode attr-dict";
+}
+
 def DPIFuncOp : SimOp<"func.dpi",
      [IsolatedFromAbove, SymbolName, SymbolVisibility, Symbol, OpAsmOpInterface,
       DeclareOpInterfaceMethods<FunctionOpInterface,

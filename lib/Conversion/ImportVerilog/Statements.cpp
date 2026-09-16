@@ -1063,38 +1063,6 @@ struct StmtVisitor {
     return failure();
   }
 
-  // According to 1800-2023 Section 21.2.1 "The display and write tasks":
-  // >> The $display and $write tasks display their arguments in the same
-  // >> order as they appear in the argument list. Each argument can be a
-  // >> string literal or an expression that returns a value.
-  // According to Section 20.10 "Severity system tasks", the same
-  // semantics apply to $fatal, $error, $warning, and $info.
-  // This means we must first check whether the first "string-able"
-  // argument is a Literal Expression which doesn't represent a fully-formatted
-  // string, otherwise we convert it to a FormatStringType.
-  FailureOr<Value>
-  getDisplayMessage(std::span<const slang::ast::Expression *const> args) {
-    if (args.size() == 0)
-      return Value{};
-
-    // Handle the string formatting.
-    // If the second argument is a Literal of some type, we should either
-    // treat it as a literal-to-be-formatted or a FormatStringType.
-    // In this check we use a StringLiteral, but slang allows casting between
-    // any literal expressions (strings, integers, reals, and time at least) so
-    // this is short-hand for "any value literal"
-    if (args[0]->as_if<slang::ast::StringLiteral>()) {
-      return context.convertFormatString(args, loc);
-    }
-    // Check if there's only one argument and it's a FormatStringType
-    if (args.size() == 1) {
-      return context.convertRvalueExpression(
-          *args[0], builder.getType<moore::FormatStringType>());
-    }
-    // Otherwise this looks invalid. Raise an error.
-    return emitError(loc) << "Failed to convert Display Message!";
-  }
-
   /// Convert a `$readmemb`/`$readmemh` system task call into a
   /// `moore.builtin.readmem` op. See IEEE 1800-2017 § 21.4.
   LogicalResult
@@ -1431,9 +1399,10 @@ struct StmtVisitor {
       if (isSWrite && args.size() < 1)
         return emitError(loc) << "$swrite requires at least 1 argument";
 
-      auto fmtValue =
-          context.convertFormatString(args.subspan(1), loc, defaultFormat,
-                                      /*appendNewline=*/false);
+      auto fmtValue = isSFormat
+                          ? context.convertSFormat(args.subspan(1), loc)
+                          : context.convertFormatString(args.subspan(1), loc,
+                                                        defaultFormat, false);
       if (failed(fmtValue))
         return failure();
       if (*fmtValue == Value{})
@@ -1477,7 +1446,7 @@ struct StmtVisitor {
         args = args.subspan(1);
       }
 
-      FailureOr<Value> maybeMessage = getDisplayMessage(args);
+      FailureOr<Value> maybeMessage = context.convertFormatString(args, loc);
       if (failed(maybeMessage))
         return failure();
       auto message = maybeMessage.value();

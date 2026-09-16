@@ -26,6 +26,12 @@ using namespace circt;
 using namespace circt::moore;
 using namespace mlir;
 
+LogicalResult SFormatDynamicBIOp::verify() {
+  if (getIsSigned().size() != getValues().size())
+    return emitOpError("requires one signedness flag per value");
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // SVModuleOp
 //===----------------------------------------------------------------------===//

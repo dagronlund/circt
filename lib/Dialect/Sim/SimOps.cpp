@@ -27,6 +27,12 @@ using namespace mlir;
 using namespace circt;
 using namespace sim;
 
+LogicalResult SFormatDynamicOp::verify() {
+  if (getIsSigned().size() != getValues().size())
+    return emitOpError("requires one signedness flag per value");
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // DPIFuncOp
 //===----------------------------------------------------------------------===//

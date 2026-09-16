@@ -3511,6 +3511,43 @@ def PlusArgsValueDynamicBIOp : Builtin<"plusargs_value_dynamic"> {
   let assemblyFormat = "$format attr-dict `:` type($found) `,` type($result)";
 }
 
+class ScanDynamicBuiltin<string mnemonic, Type sourceType> : Builtin<mnemonic> {
+  let summary = "Scan input using a runtime format string";
+  let description = [{
+    Returns the number of successfully assigned destinations, or -1 on input
+    failure before the first conversion. Only that many leading results are
+    valid. Suppressed conversions do not consume a result or count as an
+    assignment. Callers must leave the other destinations unchanged.
+  }];
+  let arguments = (ins sourceType:$source, StringType:$format);
+  let results = (outs TwoValuedI32:$count, Variadic<UnpackedType>:$values);
+  let assemblyFormat = "$source `,` $format attr-dict (`:` type($values)^)?";
+}
+
+def SScanfDynamicBIOp : ScanDynamicBuiltin<"sscanf_dynamic", StringType>;
+def FScanfDynamicBIOp : ScanDynamicBuiltin<"fscanf_dynamic", TwoValuedI32>;
+
+def SFormatDynamicBIOp : Builtin<"sformat_dynamic"> {
+  let summary = "Format a string using a runtime format expression";
+  let description = [{
+    Interprets `format` with the semantics of SystemVerilog `$sformatf`.
+    `isSigned` contains one flag per value, preserving integral signedness
+    for the simulation backend. Evaluation occurs at the procedural position.
+  }];
+  let arguments = (ins StringType:$format, Variadic<UnpackedType>:$values,
+                       DenseBoolArrayAttr:$isSigned);
+  let results = (outs StringType:$result);
+  let assemblyFormat = "$format `(` $values `)` attr-dict (`:` type($values)^)?";
+  let hasVerifier = 1;
+}
+
+def FOpenDynamicBIOp : Builtin<"fopen_dynamic"> {
+  let summary = "Open a file using a runtime mode string";
+  let arguments = (ins StringType:$filename, StringType:$mode);
+  let results = (outs TwoValuedI32:$fd);
+  let assemblyFormat = "$filename `,` $mode attr-dict";
+}
+
 //===----------------------------------------------------------------------===//
 // Math Builtins
 //===----------------------------------------------------------------------===//

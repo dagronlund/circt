@@ -4150,6 +4150,10 @@ static void populateOpConversion(ConversionPatternSet &patterns,
     // Command line input operations
     DynamicStringBuiltinConversion<PlusArgsTestDynamicBIOp, sim::PlusArgsTestDynamicOp>,
     DynamicStringBuiltinConversion<PlusArgsValueDynamicBIOp, sim::PlusArgsValueDynamicOp>,
+    DynamicStringBuiltinConversion<SScanfDynamicBIOp, sim::SScanfDynamicOp>,
+    DynamicStringBuiltinConversion<FScanfDynamicBIOp, sim::FScanfDynamicOp>,
+    DynamicStringBuiltinConversion<FOpenDynamicBIOp, sim::FOpenDynamicOp>,
+    DynamicStringBuiltinConversion<SFormatDynamicBIOp, sim::SFormatDynamicOp>,
     PlusArgsTestBIOpConversion,
     PlusArgsValueBIOpConversion,
 
