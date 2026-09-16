@@ -877,9 +877,14 @@ std::optional<int64_t> UnpackedArrayType::getBitWidth() const {
 // InOutType
 //===----------------------------------------------------------------------===//
 
+bool circt::hw::isValidInOutElementType(Type type) {
+  return isHWValueType(type) ||
+         isa<StringType, mlir::Float32Type, mlir::Float64Type>(type);
+}
+
 LogicalResult InOutType::verify(function_ref<InFlightDiagnostic()> emitError,
                                 Type innerType) {
-  if (!isHWValueType(innerType))
+  if (!isValidInOutElementType(innerType))
     return emitError() << "invalid element for hw.inout type " << innerType;
   return success();
 }

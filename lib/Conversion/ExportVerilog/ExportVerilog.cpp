@@ -1553,6 +1553,16 @@ public:
 /// in a non-procedural region.
 static StringRef getVerilogDeclWord(Operation *op,
                                     const ModuleEmitter &emitter) {
+  // Simulation variables have their own declaration keywords; adding `reg`
+  // or `logic` before `string`, `real`, or `shortreal` would be invalid SV.
+  if (op->getNumResults() == 1 &&
+      !isa<ConstantOp, AggregateConstantOp, LocalParamOp, ParamValueOp>(op)) {
+    Type type = op->getResult(0).getType();
+    if (auto inout = dyn_cast<InOutType>(type))
+      type = inout.getElementType();
+    if (isa<hw::StringType, mlir::Float32Type, mlir::Float64Type>(type))
+      return "";
+  }
   if (isa<RegOp>(op)) {
     // Check if the type stored in this register is a struct or array of
     // structs. In this case, according to spec section 6.8, the "reg" prefix
@@ -1711,6 +1721,18 @@ static bool printPackedTypeImpl(Type type, raw_ostream &os, Location loc,
                                 Type optionalAliasType = {},
                                 bool emitAsTwoStateType = false) {
   return TypeSwitch<Type, bool>(type)
+      .Case<hw::StringType>([&](auto) {
+        os << "string";
+        return true;
+      })
+      .Case<mlir::Float32Type>([&](auto) {
+        os << "shortreal";
+        return true;
+      })
+      .Case<mlir::Float64Type>([&](auto) {
+        os << "real";
+        return true;
+      })
       .Case<IntegerType>([&](IntegerType integerType) -> bool {
         if (emitAsTwoStateType && dims.empty()) {
           auto typeName = getTwoStateIntegerAtomType(integerType.getWidth());

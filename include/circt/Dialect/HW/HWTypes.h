@@ -192,6 +192,10 @@ bool isHWEnumType(mlir::Type type);
 /// dialects.
 bool isHWValueType(mlir::Type type);
 
+/// Return whether a type can be stored in an inout variable, including the
+/// string and real values used by SystemVerilog simulation code.
+bool isValidInOutElementType(mlir::Type type);
+
 /// Return the hardware bit width of a type. Does not reflect any encoding,
 /// padding, or storage scheme, just the bit (and wire width) of a
 /// statically-size type. Reflects the number of wires needed to transmit a

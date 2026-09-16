@@ -13,6 +13,6 @@
 // RUN: rm -rf %t && mkdir -p %t
 // RUN: circt-opt -export-split-verilog='dir-name=%t' %s --verify-diagnostics
 
-// expected-error @+1 {{value has an unsupported verilog type 'f32'}}
-hw.module @Top(in %out: f32) {
+// expected-error @+1 {{value has an unsupported verilog type 'f16'}}
+hw.module @Top(in %out: f16) {
 }

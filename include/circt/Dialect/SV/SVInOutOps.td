@@ -158,7 +158,7 @@ def ReadInOutOp
   let summary = "Get the value of from something of inout type (e.g. a wire or"
                 " inout port) as the value itself.";
   let arguments = (ins InOutType:$input);
-  let results = (outs HWValueType:$result);
+  let results = (outs InOutElementType:$result);
   let assemblyFormat = "$input attr-dict `:` qualified(type($input))";
 }
 

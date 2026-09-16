@@ -28,7 +28,7 @@ class SVType<string name> : TypeDef<SVDialect, name> { }
 
 // Type constraint that indicates that an operand/result may only be a valid
 // inout element type.
-def InOutElementType : Type<CPred<"hw::isHWValueType($_self)">,
+def InOutElementType : Type<CPred<"hw::isValidInOutElementType($_self)">,
                             "a valid inout element">;
 
 // This type constraint is used by operations whose asm strings have a type "T"
