@@ -108,36 +108,42 @@ struct FieldInfo {
   uint32_t offset = 0;
 };
 
-// A helper function that recursively collects the members of a struct.
-static LogicalResult collectFields(Value structRef,
-                                   SmallVector<FieldInfo> &fields,
+// Collect integer leaves in increasing storage-bit order, descending through
+// both nested structs and packed arrays.
+static LogicalResult collectFields(Value ref, SmallVector<FieldInfo> &fields,
                                    ConversionPatternRewriter &rewriter,
                                    uint32_t initialOffset = 0) {
-  auto structType =
-      cast<StructType>(cast<RefType>(structRef.getType()).getNestedType());
-  uint32_t offset = initialOffset;
-  // Visit fields in reverse order (declaration order is MSB-first)
-  for (auto &member : llvm::reverse(structType.getMembers())) {
-    auto fieldRef = StructExtractRefOp::create(rewriter, structRef.getLoc(),
-                                               RefType::get(member.type),
-                                               member.name, structRef);
+  auto type = cast<RefType>(ref.getType()).getNestedType();
+  auto size = type.getBitSize();
+  if (!size)
+    return mlir::emitError(ref.getLoc())
+           << "unsupported: field with unknown size in struct flattening";
 
-    auto fieldSize = member.type.getBitSize();
-    if (!fieldSize)
-      return mlir::emitError(structRef.getLoc())
-             << "unsupported: field with unknown size in struct flattening";
-
-    if (isa<StructType>(member.type)) {
-      auto result = collectFields(fieldRef, fields, rewriter, offset);
-      if (failed(result))
-        return result;
-    } else if (isa<UnionType>(member.type)) {
-      return mlir::emitError(structRef.getLoc())
-             << "unsupported: union member in struct flattening";
-    } else {
-      fields.push_back({fieldRef, *fieldSize, offset});
+  if (auto structType = dyn_cast<StructType>(type)) {
+    uint32_t offset = initialOffset;
+    // Declaration order is MSB-first.
+    for (auto &member : llvm::reverse(structType.getMembers())) {
+      auto fieldRef = StructExtractRefOp::create(
+          rewriter, ref.getLoc(), RefType::get(member.type), member.name, ref);
+      if (failed(collectFields(fieldRef, fields, rewriter, offset)))
+        return failure();
+      offset += *member.type.getBitSize();
     }
-    offset += *fieldSize;
+  } else if (auto arrayType = dyn_cast<ArrayType>(type)) {
+    auto elementType = arrayType.getElementType();
+    auto elementSize = *elementType.getBitSize();
+    for (uint32_t i = 0; i < arrayType.getSize(); ++i) {
+      auto elementRef = ExtractRefOp::create(rewriter, ref.getLoc(),
+                                             RefType::get(elementType), ref, i);
+      if (failed(collectFields(elementRef, fields, rewriter,
+                               initialOffset + i * elementSize)))
+        return failure();
+    }
+  } else if (isa<UnionType>(type)) {
+    return mlir::emitError(ref.getLoc())
+           << "unsupported: union member in struct flattening";
+  } else {
+    fields.push_back({ref, *size, initialOffset});
   }
   return success();
 }
