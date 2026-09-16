@@ -1527,9 +1527,15 @@ struct StmtVisitor {
       return true;
     }
 
-    // String Tasks
-    if (args.size() >= 1 && args[0]->type->isString()) {
+    // Only mutating string methods require an lvalue receiver. Other system
+    // functions may take arbitrary string expressions as their first argument.
+    if (args.size() >= 1 && args[0]->type->isString() &&
+        (nameId == ksn::Putc || nameId == ksn::IToA || nameId == ksn::HexToA ||
+         nameId == ksn::OctToA || nameId == ksn::BinToA ||
+         nameId == ksn::RealToA)) {
       auto str = context.convertLvalueExpression(*args[0]);
+      if (!str)
+        return failure();
 
       if (nameId == ksn::Putc) {
         // Slang already checks the arity of string tasks.

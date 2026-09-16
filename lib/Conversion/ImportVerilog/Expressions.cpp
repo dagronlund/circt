@@ -4150,13 +4150,21 @@ Value Context::convertSystemCall(
     assert(numArgs == 1 && "`$test$plusargs` takes 1 argument");
     auto *strLit =
         args[0]->unwrapImplicitConversions().as_if<slang::ast::StringLiteral>();
-    if (!strLit)
-      return emitError(loc) << "`$test$plusargs` argument must be a string "
-                               "literal",
-             Value{};
     auto foundTy = moore::IntType::getInt(getContext(), 1);
-    return moore::PlusArgsTestBIOp::create(
+    if (!strLit) {
+      auto format = convertRvalueExpression(
+          *args[0], moore::StringType::get(getContext()));
+      if (!format)
+        return {};
+      auto found =
+          moore::PlusArgsTestDynamicBIOp::create(builder, loc, foundTy, format);
+      return builder.createOrFold<moore::ZExtOp>(
+          loc, moore::IntType::getInt(getContext(), 32), found);
+    }
+    auto found = moore::PlusArgsTestBIOp::create(
         builder, loc, foundTy, builder.getStringAttr(strLit->getValue()));
+    return builder.createOrFold<moore::ZExtOp>(
+        loc, moore::IntType::getInt(getContext(), 32), found);
   }
 
   if (nameId == ksn::ValuePlusArgs) {
@@ -4166,26 +4174,45 @@ Value Context::convertSystemCall(
     assert(numArgs == 2 && "`$value$plusargs` takes 2 arguments");
     auto *strLit =
         args[0]->unwrapImplicitConversions().as_if<slang::ast::StringLiteral>();
-    if (!strLit)
-      return emitError(loc) << "`$value$plusargs` format must be a string "
-                               "literal",
-             Value{};
+    Value format;
+    if (!strLit) {
+      format = convertRvalueExpression(*args[0],
+                                       moore::StringType::get(getContext()));
+      if (!format)
+        return {};
+    }
     // Slang emits output arguments as a `<lvalue> = EmptyArgument` assignment;
     // unpack it to recover the lvalue that receives the parsed value.
     const auto *valueArg = args[1];
     if (const auto *assign =
             valueArg->as_if<slang::ast::AssignmentExpression>())
       valueArg = &assign->left();
+    auto resultType = convertType(*valueArg->type);
+    if (!resultType)
+      return {};
+    auto foundTy = moore::IntType::getInt(getContext(), 1);
+    if (format) {
+      auto op = moore::PlusArgsValueDynamicBIOp::create(builder, loc, foundTy,
+                                                        resultType, format);
+      // A failed lookup must leave the destination unchanged. Reuse the scan
+      // assignment control flow, including its handling of expression lvalues.
+      Context::ScanStringResult assignments;
+      assignments.assignments.emplace_back(valueArg, op.getResult(),
+                                           op.getFound());
+      if (failed(emitScanAssignments(*this, assignments, loc)))
+        return {};
+      return builder.createOrFold<moore::ZExtOp>(
+          loc, moore::IntType::getInt(getContext(), 32), op.getFound());
+    }
     auto lvalue = convertLvalueExpression(*valueArg);
     if (!lvalue)
       return {};
-    auto resultType = cast<moore::RefType>(lvalue.getType()).getNestedType();
-    auto foundTy = moore::IntType::getInt(getContext(), 1);
     auto op = moore::PlusArgsValueBIOp::create(
         builder, loc, foundTy, resultType,
         builder.getStringAttr(strLit->getValue()));
     moore::BlockingAssignOp::create(builder, loc, lvalue, op.getResult());
-    return op.getFound();
+    return builder.createOrFold<moore::ZExtOp>(
+        loc, moore::IntType::getInt(getContext(), 32), op.getFound());
   }
 
   if (nameId == ksn::FScanf) {

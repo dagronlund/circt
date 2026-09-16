@@ -3350,6 +3350,25 @@ struct FOpenBIOpConversion : public OpConversionPattern<FOpenBIOp> {
   }
 };
 
+/// Runtime-string builtins retain their operands and result types through
+/// lowering; their interpretation is deferred to the simulation backend.
+template <typename MooreOp, typename SimOp>
+struct DynamicStringBuiltinConversion : public OpConversionPattern<MooreOp> {
+  using OpConversionPattern<MooreOp>::OpConversionPattern;
+  using OpAdaptor = typename MooreOp::Adaptor;
+  LogicalResult
+  matchAndRewrite(MooreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> resultTypes;
+    if (failed(this->getTypeConverter()->convertTypes(op->getResultTypes(),
+                                                      resultTypes)))
+      return failure();
+    rewriter.template replaceOpWithNewOp<SimOp>(
+        op, resultTypes, adaptor.getOperands(), op->getAttrs());
+    return success();
+  }
+};
+
 struct PlusArgsTestBIOpConversion
     : public OpConversionPattern<PlusArgsTestBIOp> {
   using OpConversionPattern::OpConversionPattern;
@@ -4129,6 +4148,8 @@ static void populateOpConversion(ConversionPatternSet &patterns,
     ReadMemBIOpConversion,
 
     // Command line input operations
+    DynamicStringBuiltinConversion<PlusArgsTestDynamicBIOp, sim::PlusArgsTestDynamicOp>,
+    DynamicStringBuiltinConversion<PlusArgsValueDynamicBIOp, sim::PlusArgsValueDynamicOp>,
     PlusArgsTestBIOpConversion,
     PlusArgsValueBIOpConversion,
 

@@ -61,6 +61,26 @@ def PlusArgsValueOp : SimOp<"plusargs.value", [Pure]> {
   let assemblyFormat = "$formatString attr-dict `:` type($result)";
 }
 
+// Unlike the literal plusarg operations, these calls execute at their
+// procedural position and evaluate string operands at runtime.
+def PlusArgsTestDynamicOp : SimOp<"plusargs.test_dynamic", [ProceduralOp]> {
+  let summary = "Test a command-line plusarg using a runtime string";
+  let arguments = (ins DynamicStringType:$format);
+  let results = (outs I1:$found);
+  let assemblyFormat = "$format attr-dict";
+}
+
+def PlusArgsValueDynamicOp : SimOp<"plusargs.value_dynamic", [ProceduralOp]> {
+  let summary = "Read a command-line plusarg using a runtime format";
+  let description = [{
+    The result is unspecified when `found` is false. Callers must only assign
+    the destination on success.
+  }];
+  let arguments = (ins DynamicStringType:$format);
+  let results = (outs I1:$found, AnyType:$result);
+  let assemblyFormat = "$format attr-dict `:` type($result)";
+}
+
 def DPIFuncOp : SimOp<"func.dpi",
      [IsolatedFromAbove, SymbolName, SymbolVisibility, Symbol, OpAsmOpInterface,
       DeclareOpInterfaceMethods<FunctionOpInterface,

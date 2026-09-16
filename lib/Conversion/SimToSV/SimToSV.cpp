@@ -207,6 +207,57 @@ public:
   }
 };
 
+/// Preserve the execution point of runtime-string system functions. Outputs
+/// are returned through local temporaries; callers guard destination writes
+/// using the found flag or assignment count.
+template <typename OpTy>
+class DynamicStringBuiltinLowering : public OpConversionPattern<OpTy> {
+public:
+  using OpAdaptor = typename OpTy::Adaptor;
+  DynamicStringBuiltinLowering(TypeConverter &converter, MLIRContext *context,
+                               StringRef functionName)
+      : OpConversionPattern<OpTy>(converter, context),
+        functionName(functionName) {}
+
+  LogicalResult
+  matchAndRewrite(OpTy op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto declare = [&](Type type) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(op->getBlock());
+      return sv::RegOp::create(rewriter, loc, type);
+    };
+    SmallVector<Value> args(adaptor.getOperands());
+    SmallVector<Value> temporaries;
+    for (Type type : llvm::drop_begin(op->getResultTypes())) {
+      type = this->getTypeConverter()->convertType(type);
+      if (!type || !hw::isValidInOutElementType(type))
+        return rewriter.notifyMatchFailure(
+            op, "destination type cannot be represented by an SV register");
+      auto temp = declare(type);
+      temporaries.push_back(temp);
+      args.push_back(temp);
+    }
+    auto resultType =
+        this->getTypeConverter()->convertType(op->getResult(0).getType());
+    auto call = sv::SystemFunctionOp::create(rewriter, loc, resultType,
+                                             functionName, args);
+    // Capture the return value even when it has no users. SV system calls are
+    // expressions, and must not disappear or move past reads of their outputs.
+    auto status = declare(resultType);
+    sv::BPAssignOp::create(rewriter, loc, status, call);
+    SmallVector<Value> results{sv::ReadInOutOp::create(rewriter, loc, status)};
+    for (Value temp : temporaries)
+      results.push_back(sv::ReadInOutOp::create(rewriter, loc, temp));
+    rewriter.replaceOp(op, results);
+    return success();
+  }
+
+private:
+  StringRef functionName;
+};
+
 template <typename OpTy, unsigned StreamValue>
 class StreamLowering : public OpConversionPattern<OpTy> {
 public:
@@ -991,6 +1042,10 @@ struct SimToSVPass : public circt::impl::LowerSimToSVBase<SimToSVPass> {
       RewritePatternSet patterns(context);
       patterns.add<PlusArgsTestLowering>(context, state);
       patterns.add<PlusArgsValueLowering>(context, state);
+      patterns.add<DynamicStringBuiltinLowering<PlusArgsTestDynamicOp>>(
+          typeConverter, context, "test$plusargs");
+      patterns.add<DynamicStringBuiltinLowering<PlusArgsValueDynamicOp>>(
+          typeConverter, context, "value$plusargs");
       patterns.add<StdoutStreamLowering>(typeConverter, context);
       patterns.add<StderrStreamLowering>(typeConverter, context);
       patterns.add<FlushLowering>(typeConverter, context);

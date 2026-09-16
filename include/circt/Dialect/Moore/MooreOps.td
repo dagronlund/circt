@@ -3490,6 +3490,27 @@ def PlusArgsValueBIOp : Builtin<"plusargs_value"> {
       "$formatString attr-dict `:` type($found) `,` type($result)";
 }
 
+// Runtime string expressions cannot be represented by the attributes on the
+// literal-format operations above. Keep them as operands until simulation.
+def PlusArgsTestDynamicBIOp : Builtin<"plusargs_test_dynamic"> {
+  let summary = "Test a command-line plusarg using a runtime string";
+  let arguments = (ins StringType:$format);
+  let results = (outs BitType:$found);
+  let assemblyFormat = "$format attr-dict `:` type($found)";
+}
+
+def PlusArgsValueDynamicBIOp : Builtin<"plusargs_value_dynamic"> {
+  let summary = "Read a command-line plusarg using a runtime format";
+  let description = [{
+    Like `plusargs_value`, with a string operand evaluated at the call site.
+    The result is unspecified when `found` is false; callers must only assign
+    the destination on success.
+  }];
+  let arguments = (ins StringType:$format);
+  let results = (outs BitType:$found, UnpackedType:$result);
+  let assemblyFormat = "$format attr-dict `:` type($found) `,` type($result)";
+}
+
 //===----------------------------------------------------------------------===//
 // Math Builtins
 //===----------------------------------------------------------------------===//
