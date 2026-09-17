@@ -199,6 +199,11 @@ public:
   /// Check if we can promote the entire signal according to the current
   /// limitations of the pass.
   bool isPromotable() {
+    // Promotion flattens the signal into an integer. Keep aggregates that are
+    // too wide to represent as an MLIR integer in their original form.
+    if (hw::getBitWidth(sigOp.getInit().getType()) > IntegerType::kMaxWidth)
+      return false;
+
     for (unsigned i = 0; i < intervals.size(); ++i) {
       if (i >= intervals.size() - 1)
         break;
