@@ -180,3 +180,14 @@ hw.module @RemoveDriveOnlySignals(in %d: i42, in %e: i1) {
   llhd.drv %b, %d after %1 if %e : i42
   // CHECK: hw.output
 }
+
+// Promotion must not flatten aggregates wider than MLIR's integer width limit.
+// CHECK-LABEL: hw.module @large_aggregate
+hw.module @large_aggregate(in %init : !hw.array<524288xi32>, out result : !hw.array<524288xi32>) {
+  // CHECK: [[SIG:%.+]] = llhd.sig %init : !hw.array<524288xi32>
+  %sig = llhd.sig %init : !hw.array<524288xi32>
+  // CHECK: [[READ:%.+]] = llhd.prb [[SIG]] : !hw.array<524288xi32>
+  %read = llhd.prb %sig : !hw.array<524288xi32>
+  // CHECK: hw.output [[READ]] : !hw.array<524288xi32>
+  hw.output %read : !hw.array<524288xi32>
+}

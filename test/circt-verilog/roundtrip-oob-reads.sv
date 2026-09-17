@@ -19,8 +19,7 @@ endmodule
 // CHECK-LABEL: module packed_struct_array(
 typedef struct packed { bit hi; bit lo; } pair_t;
 module packed_struct_array(input pair_t [1:0] i, output pair_t [4:0] o);
-  // CHECK: [[MSB_PAD:[A-Za-z0-9_]+]] = '{'{hi: 1'h0, lo: 1'h0}, '{hi: 1'h0, lo: 1'h0}};
-  // CHECK-NEXT: [[LSB_PAD:[A-Za-z0-9_]+]] = '{'{hi: 1'h0, lo: 1'h0}};
-  // CHECK-NEXT: assign o = {[[MSB_PAD]], i, [[LSB_PAD]]};
+  // CHECK: [[PAD:[A-Za-z0-9_]+]] = '{hi: 1'h0, lo: 1'h0};
+  // CHECK-NEXT: assign o = {{\{\{\{}}[[PAD]]}, {[[PAD]]}}, i, {1{[[PAD]]}}};
   assign o = i[3:-1];
 endmodule
