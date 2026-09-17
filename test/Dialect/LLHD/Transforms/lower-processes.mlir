@@ -118,9 +118,9 @@ hw.module @SupportObservedBitcasts(in %a: i42, in %b: i42) {
 // CHECK-LABEL: @CommonPattern1(
 hw.module @CommonPattern1(in %a: i42, in %b: i42, in %c: i1) {
   // CHECK:      llhd.combinational -> i42 {
-  // CHECK-NEXT:   cf.br ^bb1
-  // CHECK-NEXT: ^bb1:
-  // CHECK-NEXT:   cf.cond_br %c, ^bb2(%a : i42), ^bb2(%b : i42)
+  // CHECK-NEXT:   cf.br ^bb1(%a, %b : i42, i42)
+  // CHECK-NEXT: ^bb1([[A:%.+]]: i42, [[B:%.+]]: i42):
+  // CHECK-NEXT:   cf.cond_br %c, ^bb2([[A]] : i42), ^bb2([[B]] : i42)
   // CHECK-NEXT: ^bb2([[ARG:%.+]]: i42):
   // CHECK-NEXT:   llhd.yield [[ARG]] : i42
   // CHECK-NEXT: }
@@ -223,9 +223,9 @@ hw.module @SkipIfValueUnobserved(in %a: i42) {
 hw.module @AllowEntryAndWaitToConvergeWithEquivalentBlockArgs(in %a : i42) {
   // CHECK:      llhd.combinational -> i42 {
   // CHECK-NEXT:   [[ADD:%.+]] = comb.add %a, %a : i42
-  // CHECK-NEXT:   cf.br ^bb1
-  // CHECK-NEXT: ^bb1:
-  // CHECK-NEXT:   llhd.yield [[ADD]] : i42
+  // CHECK-NEXT:   cf.br ^bb1([[ADD]] : i42)
+  // CHECK-NEXT: ^bb1([[ARG:%.+]]: i42):
+  // CHECK-NEXT:   llhd.yield [[ARG]] : i42
   // CHECK-NEXT: }
   %0 = llhd.process -> i42 {
     %1 = comb.add %a, %a : i42
@@ -276,4 +276,35 @@ hw.module @DelayedWaitsAreNotCombinational(in %v0: i1, in %v1: i1, in %v2: i1) {
     // CHECK-NEXT: llhd.wait delay
     llhd.wait delay %0, ^bb1
   }
+}
+
+// Keep equivalent branches separate during process cleanup. Merging chains of
+// such diamonds from inlined functions can create exponentially many arguments.
+// CHECK-LABEL: @PreserveDiamondBranches(
+hw.module @PreserveDiamondBranches(in %cond: i1, in %a: i8, in %b: i8,
+                                  out result: i8) {
+  // CHECK: llhd.combinational -> i8
+  // CHECK: cf.cond_br %cond, ^bb2, ^bb3
+  // CHECK: ^bb2:
+  // CHECK-NEXT: [[LEFT:%.+]] = comb.add %a, %a : i8
+  // CHECK-NEXT: cf.br ^bb4([[LEFT]] : i8)
+  // CHECK: ^bb3:
+  // CHECK-NEXT: [[RIGHT:%.+]] = comb.add %b, %b : i8
+  // CHECK-NEXT: cf.br ^bb4([[RIGHT]] : i8)
+  // CHECK: ^bb4([[RESULT:%.+]]: i8):
+  // CHECK-NEXT: llhd.yield [[RESULT]] : i8
+  %result = llhd.process -> i8 {
+    cf.br ^loop
+  ^loop:
+    cf.cond_br %cond, ^left, ^right
+  ^left:
+    %left = comb.add %a, %a : i8
+    cf.br ^merge(%left : i8)
+  ^right:
+    %right = comb.add %b, %b : i8
+    cf.br ^merge(%right : i8)
+  ^merge(%value: i8):
+    llhd.wait yield (%value : i8), (%cond, %a, %b : i1, i8, i8), ^loop
+  }
+  hw.output %result : i8
 }
