@@ -329,3 +329,23 @@ moore.module @PackedStructSharedExtract() {
     moore.return
   }
 }
+
+// CHECK-LABEL: moore.module @PackedStructDynamicRead
+moore.module @PackedStructDynamicRead(in %index : !moore.l3) {
+  %word = moore.variable : <struct<{upper: l4, lower: l4}>>
+  moore.procedure initial {
+    %slice = moore.dyn_extract_ref %word from %index : <struct<{upper: l4, lower: l4}>>, !moore.l3 -> <l3>
+    // CHECK: [[WORD:%.+]] = moore.read %word : <struct<{upper: l4, lower: l4}>>
+    // CHECK: [[BITS:%.+]] = moore.packed_to_sbv [[WORD]] : struct<{upper: l4, lower: l4}>
+    // CHECK: [[OLD:%.+]] = moore.dyn_extract [[BITS]] from %index : l8, l3 -> l3
+    %old = moore.read %slice : <l3>
+    %mask = moore.constant 7 : l3
+    // CHECK: [[NEW:%.+]] = moore.or [[OLD]], %{{.+}} : l3
+    %new = moore.or %old, %mask : l3
+    // CHECK: scf.if
+    // CHECK: moore.dyn_extract [[NEW]]
+    // CHECK: moore.blocking_assign
+    moore.blocking_assign %slice, %new : l3
+    moore.return
+  }
+}
