@@ -189,10 +189,34 @@ struct CovergroupLowering {
       fn.getBody().takeBody(decl.getBody());
       auto &body = fn.getBody().front();
       auto instance = body.insertArgument(0u, ptrTy, decl.getLoc());
+      // Explicit bins already carry their complete matching predicate. Lower
+      // ordinary bins as a single automatic bin and illegal hits as errors.
+      DenseSet<Operation *> explicitPoints;
+      for (auto bin : llvm::make_early_inc_range(body.getOps<CoverBinOp>())) {
+        builder.setInsertionPoint(bin);
+        if (bin.getIllegal()) {
+          auto hit = moore::ToBuiltinIntOp::create(builder, bin.getLoc(),
+                                                   bin.getHit());
+          auto check = scf::IfOp::create(builder, bin.getLoc(), hit, false);
+          OpBuilder::InsertionGuard guard(builder);
+          builder.setInsertionPointToStart(&check.getThenRegion().front());
+          auto abortFn = functions.getOrCreate(builder, "abort", {}, {});
+          func::CallOp::create(builder, bin.getLoc(), abortFn);
+        } else {
+          auto zero = moore::ConstantOp::create(
+              builder, bin.getLoc(),
+              moore::IntType::getInt(module.getContext(), 1), 0, false);
+          auto point =
+              CoverpointOp::create(builder, bin.getLoc(), bin.getNameAttr(),
+                                   zero, bin.getHit(), false);
+          explicitPoints.insert(point);
+        }
+        bin.erase();
+      }
       uint64_t numCounters = 0;
       for (auto point : body.getOps<CoverpointOp>()) {
         pointOffsets[point] = numCounters;
-        numCounters += 64;
+        numCounters += explicitPoints.contains(point) ? 1 : 64;
       }
       groups[FlatSymbolRefAttr::get(decl.getSymNameAttr())] = {
           fn.getSymNameAttr(), std::max(uint64_t(1), numCounters)};

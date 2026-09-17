@@ -2940,7 +2940,7 @@ struct ClassMethodVisitor : ClassDeclVisitorBase {
 } // namespace
 
 namespace {
-/// Check sample expressions and collect module signals for clocked groups.
+/// Check sample expressions and collect module signals for sampling.
 struct CoverpointExprChecker
     : slang::ast::ASTVisitor<CoverpointExprChecker,
                              slang::ast::VisitFlags::Expressions> {
@@ -3049,24 +3049,23 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     if (!point)
       continue; // Built-in methods and option structures.
     auto pointLoc = convertLocation(point->location);
-    if (!point->options.empty() ||
-        !point->membersOfType<slang::ast::CoverageBinSymbol>().empty()) {
-      mlir::emitError(pointLoc)
-          << "unsupported coverpoint explicit bins or options";
+    if (!point->options.empty()) {
+      mlir::emitError(pointLoc) << "unsupported coverpoint options";
       return {};
     }
-    if (point->getType().getCanonicalType().kind ==
-            slang::ast::SymbolKind::EnumType ||
-        point->getCoverageExpr()
-                .unwrapImplicitConversions()
-                .type->getCanonicalType()
-                .kind == slang::ast::SymbolKind::EnumType) {
+    if (point->membersOfType<slang::ast::CoverageBinSymbol>().empty() &&
+        (point->getType().getCanonicalType().kind ==
+             slang::ast::SymbolKind::EnumType ||
+         point->getCoverageExpr()
+                 .unwrapImplicitConversions()
+                 .type->getCanonicalType()
+                 .kind == slang::ast::SymbolKind::EnumType)) {
       mlir::emitError(pointLoc) << "unsupported enum coverpoint automatic bins";
       return {};
     }
     CoverpointExprChecker checker;
-    if (group.getCoverageEvent() && group.getParentScope()->asSymbol().kind ==
-                                        slang::ast::SymbolKind::InstanceBody)
+    if (group.getParentScope()->asSymbol().kind ==
+        slang::ast::SymbolKind::InstanceBody)
       checker.captureScope = group.getParentScope();
     point->getCoverageExpr().visit(checker);
     if (auto *iff = point->getIffExpr())
@@ -3116,6 +3115,52 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     auto name = point->name.empty() ? ("$coverpoint" + Twine(pointIndex)).str()
                                     : std::string(point->name);
     ++pointIndex;
+    auto bins = point->membersOfType<slang::ast::CoverageBinSymbol>();
+    if (!bins.empty()) {
+      for (const auto &bin : bins) {
+        auto binLoc = convertLocation(bin.location);
+        if (bin.isArray || bin.isWildcard || bin.isDefault ||
+            bin.isDefaultSequence || bin.getIffExpr() || bin.getWithExpr() ||
+            bin.getSetCoverageExpr() || !bin.getTransList().empty() ||
+            bin.binsKind == slang::ast::CoverageBinSymbol::IgnoreBins) {
+          mlir::emitError(binLoc)
+              << "unsupported coverage bin: expected a scalar "
+                 "value bin or illegal bin";
+          return {};
+        }
+        Value hit;
+        for (const auto *expr : bin.getValues()) {
+          auto constant = evaluateConstant(*expr);
+          if (!constant || !constant.isInteger()) {
+            mlir::emitError(binLoc)
+                << "unsupported coverage bin value: expected "
+                   "an integral constant";
+            return {};
+          }
+          auto binValue = materializeConstant(constant, *expr->type, binLoc);
+          if (!binValue)
+            return {};
+          binValue = materializeConversion(value.getType(), binValue,
+                                           expr->type->isSigned(), binLoc);
+          if (!binValue)
+            return {};
+          Value matches =
+              moore::CaseEqOp::create(builder, binLoc, value, binValue);
+          hit = hit ? moore::OrOp::create(builder, binLoc, hit, matches)
+                    : matches;
+        }
+        if (!hit) {
+          mlir::emitError(binLoc) << "unsupported empty coverage bin";
+          return {};
+        }
+        hit = moore::AndOp::create(builder, binLoc, hit, enable);
+        moore::CoverBinOp::create(
+            builder, binLoc, builder.getStringAttr(name),
+            builder.getStringAttr(bin.name), hit,
+            bin.binsKind == slang::ast::CoverageBinSymbol::IllegalBins);
+      }
+      continue;
+    }
     moore::CoverpointOp::create(builder, pointLoc, builder.getStringAttr(name),
                                 value, enable, point->getType().isSigned());
   }

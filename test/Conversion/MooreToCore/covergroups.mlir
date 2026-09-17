@@ -87,3 +87,32 @@ func.func @test_empty() {
   moore.covergroup.sample %handle() : <@empty>
   return
 }
+
+// Explicit bins count once per hit, including when multiple values match.
+// Illegal bins raise an error only when their matching predicate is true.
+// CHECK-LABEL: func.func private @"explicit::sample"(
+// CHECK-SAME: %[[HANDLE:.*]]: !llvm.ptr, %[[HIT:.*]]: i1, %[[BAD:.*]]: i1)
+moore.covergroup.decl @explicit {
+^bb0(%hit: !moore.i1, %bad: !moore.i1):
+  // CHECK: call @abort
+  // CHECK: scf.if %[[HIT]] {
+  // CHECK: llvm.load
+  // CHECK: arith.addi
+  // CHECK: arith.select
+  // CHECK: llvm.store
+  moore.coverbin "value" "zero" if %hit
+  // CHECK: scf.if %[[BAD]] {
+  // CHECK-NEXT: call @abort
+  moore.coverbin "value" "one" if %bad {illegal}
+  // CHECK: return
+}
+
+// CHECK-LABEL: func.func @allocate_explicit()
+func.func @allocate_explicit() -> !moore.covergroup<@explicit> {
+  // Only the ordinary explicit bin needs a counter.
+  // CHECK: %[[COUNT:.*]] = llvm.mlir.constant(1 : i64)
+  // CHECK: %[[SIZE:.*]] = llvm.mlir.constant(8 : i64)
+  // CHECK: call @calloc(%[[COUNT]], %[[SIZE]])
+  %instance = moore.covergroup.new : <@explicit>
+  return %instance : !moore.covergroup<@explicit>
+}

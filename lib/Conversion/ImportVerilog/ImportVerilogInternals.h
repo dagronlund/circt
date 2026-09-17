@@ -580,7 +580,7 @@ struct Context {
   DenseMap<const slang::ast::CovergroupType *, moore::CovergroupDeclOp>
       covergroups;
 
-  /// Module signals passed as implicit inputs when sampling clocked groups.
+  /// Module signals passed as implicit inputs when sampling covergroups.
   DenseMap<const slang::ast::CovergroupType *,
            SmallVector<const slang::ast::NamedValueExpression *>>
       covergroupCaptures;

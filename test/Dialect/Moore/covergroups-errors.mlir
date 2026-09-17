@@ -52,3 +52,21 @@ func.func @missing(%instance: !moore.covergroup<@missing>) {
   moore.covergroup.sample %instance() : !moore.covergroup<@missing>
   return
 }
+
+// -----
+
+// expected-error @below {{explicit bin names must be nonempty and unique}}
+moore.covergroup.decl @bad {
+^bb0(%hit: !moore.i1):
+  moore.coverbin "value" "zero" if %hit
+  moore.coverbin "value" "zero" if %hit {illegal}
+}
+
+// -----
+
+// expected-error @below {{coverpoints cannot mix automatic and explicit bins}}
+moore.covergroup.decl @bad {
+^bb0(%value: !moore.i1):
+  moore.coverpoint "value" %value if %value : i1
+  moore.coverbin "value" "one" if %value
+}

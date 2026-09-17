@@ -3,8 +3,8 @@
 
 module top;
   covergroup cg with function sample(int value);
-    // expected-error @below {{unsupported coverpoint explicit bins or options}}
-    cp: coverpoint value { bins one = {1}; }
+    // expected-error @below {{unsupported coverpoint options}}
+    cp: coverpoint value { option.at_least = 2; }
   endgroup
   cg coverage = new();
 endmodule
@@ -27,16 +27,6 @@ module top;
     b: coverpoint value;
     // expected-error @below {{unsupported covergroup cross}}
     cross a, b;
-  endgroup
-  cg coverage = new();
-endmodule
-
-// -----
-module top;
-  int captured;
-  covergroup cg;
-    // expected-error @below {{unsupported coverpoint expression: expected sample inputs and constants}}
-    coverpoint captured;
   endgroup
   cg coverage = new();
 endmodule
@@ -117,4 +107,26 @@ module top;
     coverpoint value;
   endgroup
   cg coverage = new();
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(bit value);
+    coverpoint value {
+      // expected-error @below {{unsupported coverage bin: expected a scalar value bin or illegal bin}}
+      bins values[] = {0, 1};
+    }
+  endgroup
+  cg coverage = new;
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(bit [3:0] value);
+    coverpoint value {
+      // expected-error @below {{unsupported coverage bin value: expected an integral constant}}
+      bins values = {[0:3]};
+    }
+  endgroup
+  cg coverage = new;
 endmodule

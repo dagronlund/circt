@@ -24,3 +24,15 @@ func.func @null() -> !moore.covergroup<@cg> {
   %null = moore.covergroup.null : !moore.covergroup<@cg>
   return %null : !moore.covergroup<@cg>
 }
+
+// CHECK-LABEL: moore.covergroup.decl @explicit
+moore.covergroup.decl @explicit {
+^bb0(%hit: !moore.i1):
+  // CHECK: moore.coverbin "value" "zero" if
+  moore.coverbin "value" "zero" if %hit
+  // CHECK: moore.coverbin "value" "one" if {{.*}} {illegal}
+  moore.coverbin "value" "one" if %hit {illegal}
+  // Different coverpoints may reuse a bin name.
+  // CHECK: moore.coverbin "other" "zero" if
+  moore.coverbin "other" "zero" if %hit
+}
