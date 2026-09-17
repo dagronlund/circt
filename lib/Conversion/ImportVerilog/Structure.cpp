@@ -9,6 +9,7 @@
 #include "ImportVerilogInternals.h"
 #include "slang/ast/Compilation.h"
 #include "slang/ast/symbols/ClassSymbols.h"
+#include "slang/ast/symbols/CoverSymbols.h"
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/syntax/AllSyntax.h"
 #include "slang/syntax/SyntaxVisitor.h"
@@ -92,6 +93,10 @@ struct BaseVisitor {
   // sake of name resolution, such as enum variant names.
   LogicalResult visit(const slang::ast::TransparentMemberSymbol &) {
     return success();
+  }
+
+  LogicalResult visit(const slang::ast::CovergroupType &group) {
+    return success(bool(context.declareCovergroup(group)));
   }
 
   // Handle classes without parameters or specialized generic classes
@@ -2887,6 +2892,140 @@ struct ClassMethodVisitor : ClassDeclVisitorBase {
   }
 };
 } // namespace
+
+namespace {
+/// This first lowering supports expressions of sample inputs and constants.
+/// Captured module/class state requires per-instance bindings on construction.
+struct CoverpointExprChecker
+    : slang::ast::ASTVisitor<CoverpointExprChecker,
+                             slang::ast::VisitFlags::Expressions> {
+  bool supported = true;
+  void handle(const slang::ast::NamedValueExpression &expr) {
+    if (expr.symbol.kind == slang::ast::SymbolKind::Parameter ||
+        expr.symbol.kind == slang::ast::SymbolKind::EnumValue)
+      return;
+    auto *arg = expr.symbol.as_if<slang::ast::FormalArgumentSymbol>();
+    if (!arg || !(arg->flags & slang::ast::VariableFlags::CoverageSampleFormal))
+      supported = false;
+  }
+  void handle(const slang::ast::HierarchicalValueExpression &) {
+    supported = false;
+  }
+  void handle(const slang::ast::CallExpression &) { supported = false; }
+};
+} // namespace
+
+moore::CovergroupDeclOp
+Context::declareCovergroup(const slang::ast::CovergroupType &group) {
+  if (auto op = covergroups.lookup(&group))
+    return op;
+  auto loc = convertLocation(group.location);
+  const auto &body = group.getBody();
+  if (!group.getArguments().empty() || group.getCoverageEvent() ||
+      group.getBaseGroup() || !body.options.empty()) {
+    mlir::emitError(loc) << "unsupported covergroup constructor arguments, "
+                            "coverage event, inheritance, or options";
+    return {};
+  }
+
+  OpBuilder::InsertionGuard guard(builder);
+  auto locationKey = LocationKey::get(group.location, sourceManager);
+  auto it = orderedRootOps.upper_bound(locationKey);
+  if (it == orderedRootOps.end())
+    builder.setInsertionPointToEnd(intoModuleOp.getBody());
+  else
+    builder.setInsertionPoint(it->second);
+  auto decl = moore::CovergroupDeclOp::create(
+      builder, loc, fullyQualifiedClassName(*this, group), StringAttr{});
+  orderedRootOps.insert(it, {locationKey, decl});
+  symbolTable.insert(decl);
+  auto &block = decl.getBody().emplaceBlock();
+  builder.setInsertionPointToEnd(&block);
+  ValueSymbolScope scope(valueSymbols);
+
+  // Slang keeps the formals referenced by coverpoints in the group scope,
+  // separately from the copies in the built-in sample subroutine.
+  for (const auto &arg :
+       group.membersOfType<slang::ast::FormalArgumentSymbol>()) {
+    if (arg.direction != slang::ast::ArgumentDirection::In) {
+      mlir::emitError(convertLocation(arg.location))
+          << "unsupported covergroup sample argument direction";
+      return {};
+    }
+    auto type =
+        dyn_cast_or_null<moore::UnpackedType>(convertType(arg.getType()));
+    if (!type)
+      return {};
+    auto value = block.addArgument(type, convertLocation(arg.location));
+    auto var = moore::VariableOp::create(
+        builder, value.getLoc(), moore::RefType::get(type),
+        builder.getStringAttr(arg.name), value);
+    valueSymbols.insert(&arg, var);
+  }
+
+  unsigned pointIndex = 0;
+  for (const auto &member : body.members()) {
+    if (member.kind == slang::ast::SymbolKind::CoverCross) {
+      mlir::emitError(convertLocation(member.location))
+          << "unsupported covergroup cross";
+      return {};
+    }
+    auto *point = member.as_if<slang::ast::CoverpointSymbol>();
+    if (!point)
+      continue; // Built-in methods and option structures.
+    auto pointLoc = convertLocation(point->location);
+    if (!point->options.empty() ||
+        !point->membersOfType<slang::ast::CoverageBinSymbol>().empty()) {
+      mlir::emitError(pointLoc)
+          << "unsupported coverpoint explicit bins or options";
+      return {};
+    }
+    if (point->getType().getCanonicalType().kind ==
+            slang::ast::SymbolKind::EnumType ||
+        point->getCoverageExpr()
+                .unwrapImplicitConversions()
+                .type->getCanonicalType()
+                .kind == slang::ast::SymbolKind::EnumType) {
+      mlir::emitError(pointLoc) << "unsupported enum coverpoint automatic bins";
+      return {};
+    }
+    CoverpointExprChecker checker;
+    point->getCoverageExpr().visit(checker);
+    if (auto *iff = point->getIffExpr())
+      iff->visit(checker);
+    if (!checker.supported) {
+      mlir::emitError(pointLoc) << "unsupported coverpoint expression: "
+                                   "expected sample inputs and constants";
+      return {};
+    }
+    auto value = convertRvalueExpression(point->getCoverageExpr());
+    if (!value)
+      return {};
+    value = materializePackedToSBVConversion(value, pointLoc, false);
+    if (!value)
+      return {};
+    Value enable;
+    if (auto *iff = point->getIffExpr()) {
+      enable = convertRvalueExpression(*iff);
+      if (!enable)
+        return {};
+      enable = convertToBool(enable, Domain::TwoValued);
+    } else {
+      enable = moore::ConstantOp::create(
+          builder, pointLoc, moore::IntType::getInt(getContext(), 1), 1,
+          /*isSigned=*/false);
+    }
+    if (!enable)
+      return {};
+    auto name = point->name.empty() ? ("$coverpoint" + Twine(pointIndex)).str()
+                                    : std::string(point->name);
+    ++pointIndex;
+    moore::CoverpointOp::create(builder, pointLoc, builder.getStringAttr(name),
+                                value, enable, point->getType().isSigned());
+  }
+  covergroups[&group] = decl;
+  return decl;
+}
 
 ClassLowering *Context::declareClass(const slang::ast::ClassType &cls) {
   // Check if there already is a declaration for this class.

@@ -16,6 +16,24 @@ The `moore` and `sv` dialect may eventually converge into a single dialect.
 As we are building out the Verilog frontend capabilities of CIRCT it is valuable to have a separate ingestion dialect, such that we do not have to make disruptive changes to the load-bearing `sv` dialect used in production.
 
 
+## Functional coverage
+
+Basic explicitly sampled SystemVerilog covergroups can be imported with
+`circt-verilog --ir-moore`. A `moore.covergroup.decl` holds the sample inputs
+and coverpoint expressions, `moore.covergroup.new` creates an independent
+instance, and `moore.covergroup.sample` records a sample on that instance.
+`moore.coverpoint` preserves automatic binning, signedness, and an optional
+SystemVerilog `iff` condition.
+
+The importer currently supports input sample arguments and integral coverpoint
+expressions involving those arguments and constants. Enum coverpoints, explicit
+bins, crosses, coverage options, constructor arguments, captured state, function
+calls in coverpoint expressions, sampling events,
+inheritance, and coverage methods other than `sample` are not yet supported.
+These operations preserve functional coverage in Moore IR; lowering to a
+simulation runtime, bin counters, and coverage reporting is not implemented.
+
+
 ## Types
 
 ### Simple Bit Vector Type
@@ -67,6 +85,7 @@ Uninitialized variables:
 | `string`            | "" (empty string)               |
 | `event`             | New event                       |
 | `class`             | `null`                          |
+| `covergroup`        | `null`                          |
 | `interface class`   | `null`                          |
 | `chandle`           | `null`                          |
 | `virtual interface` | `null`                          |

@@ -27,6 +27,7 @@ namespace moore {
 class ArrayType;
 class AssocArrayType;
 class ChandleType;
+class CovergroupHandleType;
 class EventType;
 class IntType;
 class OpenArrayType;
@@ -105,7 +106,7 @@ public:
     return llvm::isa<PackedType, StringType, ChandleType, EventType, RealType,
                      UnpackedArrayType, OpenUnpackedArrayType, AssocArrayType,
                      QueueType, UnpackedStructType, UnpackedUnionType, RefType,
-                     ClassHandleType>(type);
+                     ClassHandleType, CovergroupHandleType>(type);
   }
 
   /// Get the value domain of this type.

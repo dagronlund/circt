@@ -77,6 +77,19 @@ def ClassHandleType : MooreTypeDef<"ClassHandle", [], "moore::UnpackedType"> {
 }
 
 //===----------------------------------------------------------------------===//
+// CovergroupHandleType
+//===----------------------------------------------------------------------===//
+
+def CovergroupHandleType
+    : MooreTypeDef<"CovergroupHandle", [], "moore::UnpackedType"> {
+  let mnemonic = "covergroup";
+  let summary = "Handle to a functional coverage instance";
+  let parameters = (ins AttrParameter<"::mlir::FlatSymbolRefAttr",
+                                     "covergroup declaration">:$group);
+  let assemblyFormat = "`<` $group `>`";
+}
+
+//===----------------------------------------------------------------------===//
 // TimeType
 //===----------------------------------------------------------------------===//
 

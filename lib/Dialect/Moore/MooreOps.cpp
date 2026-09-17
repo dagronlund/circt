@@ -19,6 +19,7 @@
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include <mlir/Dialect/Func/IR/FuncOps.h>
 
@@ -1495,6 +1496,44 @@ OpFoldResult DivSOp::fold(FoldAdaptor adaptor) {
     return FVIntegerAttr::get(getContext(),
                               lhs.getValue().sdiv(rhs.getValue()));
   return {};
+}
+
+//===----------------------------------------------------------------------===//
+// Functional coverage
+//===----------------------------------------------------------------------===//
+
+LogicalResult CovergroupDeclOp::verify() {
+  if (getBody().empty())
+    return emitOpError("requires a sample body");
+  for (auto type : getBody().front().getArgumentTypes())
+    if (!isa<UnpackedType>(type))
+      return emitOpError("sample arguments must have unpacked Moore types");
+  llvm::StringSet<> names;
+  for (auto point : getBody().front().getOps<CoverpointOp>())
+    if (point.getName().empty() || !names.insert(point.getName()).second)
+      return emitOpError("coverpoint names must be nonempty and unique");
+  return success();
+}
+
+LogicalResult CovergroupNewOp::verify() {
+  auto decl = SymbolTable::lookupNearestSymbolFrom<CovergroupDeclOp>(
+      *this, getResult().getType().getGroup());
+  if (!decl)
+    return emitOpError("expected a covergroup declaration for result type");
+  return success();
+}
+
+LogicalResult CovergroupSampleOp::verify() {
+  auto decl = SymbolTable::lookupNearestSymbolFrom<CovergroupDeclOp>(
+      *this, getInstance().getType().getGroup());
+  if (!decl)
+    return emitOpError("expected a covergroup declaration for instance type");
+  if (decl.getBody().empty())
+    return emitOpError("covergroup declaration has no body");
+  if (getInputs().getTypes() != decl.getBody().front().getArgumentTypes())
+    return emitOpError(
+        "sample arguments must match the covergroup body arguments");
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

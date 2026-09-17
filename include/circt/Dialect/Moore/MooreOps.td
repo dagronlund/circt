@@ -2658,6 +2658,68 @@ def YieldOp : MooreOp<"yield", [
 }
 
 //===----------------------------------------------------------------------===//
+// Functional coverage
+//===----------------------------------------------------------------------===//
+
+def CovergroupDeclOp : MooreOp<"covergroup.decl", [
+    SymbolName, SymbolVisibility, Symbol, IsolatedFromAbove,
+    SingleBlock, NoTerminator]> {
+  let summary = "Declare an explicitly sampled covergroup";
+  let description = [{
+    The body's arguments are the sample function's input values. Each sample
+    evaluates this body and records its coverpoints in the sampled instance.
+    The body is not executed when the declaration is encountered.
+  }];
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       OptionalAttr<StrAttr>:$sym_visibility);
+  let regions = (region AnyRegion:$body);
+  let assemblyFormat = "$sym_name attr-dict-with-keyword $body";
+  let hasVerifier = 1;
+}
+
+def CovergroupNewOp : MooreOp<"covergroup.new"> {
+  let summary = "Allocate a fresh covergroup instance with empty coverage";
+  let results = (outs CovergroupHandleType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+  let hasVerifier = 1;
+}
+
+def NullCovergroupOp : MooreOp<"covergroup.null", [Pure]> {
+  let summary = "Create a null covergroup handle";
+  let results = (outs CovergroupHandleType:$result);
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def CovergroupSampleOp : MooreOp<"covergroup.sample"> {
+  let summary = "Sample the coverpoints of a covergroup instance";
+  let description = [{
+    Executes the referenced covergroup's body with the supplied arguments,
+    updating the instance's coverage. Sampling a null handle is a runtime error.
+    Sampling has side effects even if the same values have been sampled before.
+  }];
+  let arguments = (ins CovergroupHandleType:$instance,
+                       Variadic<UnpackedType>:$inputs);
+  let assemblyFormat = [{
+    $instance `(` $inputs `)` attr-dict `:` type($instance)
+    (`(` type($inputs)^ `)`)?
+  }];
+  let hasVerifier = 1;
+}
+
+def CoverpointOp : MooreOp<"coverpoint", [HasParent<"CovergroupDeclOp">]> {
+  let summary = "Record an integral coverpoint with automatic bins";
+  let description = [{
+    Records the value in the enclosing sample's coverage instance when enabled.
+    Uses SystemVerilog's default automatic binning (auto_bin_max = 64), with
+    signedness determining the value range. X and Z values do not hit a bin.
+    The name identifies this coverpoint within the declaration.
+  }];
+  let arguments = (ins StrAttr:$name, SimpleBitVectorType:$value, BitType:$enable,
+                       UnitAttr:$isSigned);
+  let assemblyFormat = "$name $value `if` $enable attr-dict `:` type($value)";
+}
+
+//===----------------------------------------------------------------------===//
 // Assertions
 //===----------------------------------------------------------------------===//
 
