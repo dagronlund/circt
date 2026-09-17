@@ -110,3 +110,40 @@ endmodule
 // CHECK-LABEL: moore.covergroup.decl @"constructor_inputs::cg"
 // CHECK-NEXT: ^bb0(%{{[^:]+}}: !moore.i32):
 // CHECK: moore.coverpoint "value"
+
+
+// CHECK-LABEL: moore.module @per_instance
+module per_instance;
+  covergroup cg with function sample(int value);
+    option.per_instance = 1;
+    coverpoint value;
+  endgroup
+  // CHECK: moore.covergroup.new : <@"per_instance::cg">
+  cg coverage = new();
+  // CHECK: moore.covergroup.new : <@"per_instance::cg">
+  cg second = new();
+  initial begin
+    // CHECK: moore.covergroup.sample {{.*}}({{.*}}) : <@"per_instance::cg">(!moore.i32)
+    coverage.sample(1);
+    // CHECK: moore.covergroup.sample {{.*}}({{.*}}) : <@"per_instance::cg">(!moore.i32)
+    second.sample(2);
+  end
+endmodule
+
+// CHECK-LABEL: moore.covergroup.decl @"per_instance::cg"
+// CHECK: moore.coverpoint "value"
+
+// CHECK-LABEL: moore.module @per_instance_default
+module per_instance_default;
+  localparam bit ENABLED = 0;
+  covergroup cg with function sample(int value);
+    option.per_instance = ENABLED;
+    coverpoint value;
+  endgroup
+  cg coverage = new();
+  // CHECK: moore.covergroup.sample
+  initial coverage.sample(1);
+endmodule
+
+// CHECK-LABEL: moore.covergroup.decl @"per_instance_default::cg"
+// CHECK: moore.coverpoint "value"

@@ -80,9 +80,9 @@ endmodule
 
 // -----
 module top;
-  // expected-error @below {{unsupported covergroup coverage event, inheritance, or options}}
+  // expected-error @below {{unsupported covergroup inheritance or options}}
   covergroup cg with function sample(int value);
-    option.per_instance = 1;
+    option.at_least = 2;
     coverpoint value;
   endgroup
   cg coverage = new();
@@ -105,4 +105,15 @@ module top;
     coverpoint value iff (value < limit);
   endgroup
   cg coverage = new(4);
+endmodule
+
+// -----
+module top;
+  bit enabled;
+  // expected-error @below {{unsupported covergroup inheritance or options}}
+  covergroup cg with function sample(int value);
+    option.per_instance = enabled;
+    coverpoint value;
+  endgroup
+  cg coverage = new();
 endmodule

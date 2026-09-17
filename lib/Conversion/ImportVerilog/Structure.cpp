@@ -2835,11 +2835,23 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     return op;
   auto loc = convertLocation(group.location);
   const auto &body = group.getBody();
-  if (group.getCoverageEvent() || group.getBaseGroup() ||
-      !body.options.empty()) {
+  if (group.getCoverageEvent() || group.getBaseGroup()) {
     mlir::emitError(loc)
         << "unsupported covergroup coverage event, inheritance, "
            "or options";
+    return {};
+  }
+  for (const auto &option : body.options) {
+    // The current lowering already keeps counters for every instance. A
+    // constant per_instance setting therefore requires no additional state.
+    // Do not discard dynamic initializers, which can have side effects.
+    if (!option.isTypeOption() && option.getName() == "per_instance") {
+      const auto *assignment =
+          option.getExpression().as_if<slang::ast::AssignmentExpression>();
+      if (assignment && evaluateConstant(assignment->right()))
+        continue;
+    }
+    mlir::emitError(loc) << "unsupported covergroup inheritance or options";
     return {};
   }
   for (const auto *arg : group.getArguments()) {
