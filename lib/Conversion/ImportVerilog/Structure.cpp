@@ -2921,11 +2921,19 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     return op;
   auto loc = convertLocation(group.location);
   const auto &body = group.getBody();
-  if (!group.getArguments().empty() || group.getCoverageEvent() ||
-      group.getBaseGroup() || !body.options.empty()) {
-    mlir::emitError(loc) << "unsupported covergroup constructor arguments, "
-                            "coverage event, inheritance, or options";
+  if (group.getCoverageEvent() || group.getBaseGroup() ||
+      !body.options.empty()) {
+    mlir::emitError(loc)
+        << "unsupported covergroup coverage event, inheritance, "
+           "or options";
     return {};
+  }
+  for (const auto *arg : group.getArguments()) {
+    if (arg->direction != slang::ast::ArgumentDirection::In) {
+      mlir::emitError(convertLocation(arg->location))
+          << "unsupported covergroup constructor argument direction";
+      return {};
+    }
   }
 
   OpBuilder::InsertionGuard guard(builder);
@@ -2947,6 +2955,10 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
   // separately from the copies in the built-in sample subroutine.
   for (const auto &arg :
        group.membersOfType<slang::ast::FormalArgumentSymbol>()) {
+    // Constructor inputs are not sample inputs. Unused constructor inputs need
+    // no storage; references to them are rejected by CoverpointExprChecker.
+    if (!(arg.flags & slang::ast::VariableFlags::CoverageSampleFormal))
+      continue;
     if (arg.direction != slang::ast::ArgumentDirection::In) {
       mlir::emitError(convertLocation(arg.location))
           << "unsupported covergroup sample argument direction";

@@ -1,5 +1,13 @@
 // RUN: circt-verilog --ir-moore %s | circt-opt --verify-roundtrip | FileCheck %s
+// RUN: circt-verilog --ir-llhd %s | circt-opt --verify-roundtrip | FileCheck %s --check-prefix=CORE
+// RUN: circt-verilog --ir-hw %s | circt-opt --verify-roundtrip | FileCheck %s --check-prefix=CORE
 // REQUIRES: slang
+
+// CORE-NOT: moore.
+// CORE: hw.module @top
+// CORE-NOT: moore.
+// CORE: hw.module @constructor_inputs
+// CORE-NOT: moore.
 
 // CHECK-LABEL: moore.module @top
 module top;
@@ -75,3 +83,30 @@ endmodule
 
 // CHECK-LABEL: moore.covergroup.decl @"constant_point::cg"
 // CHECK: moore.coverpoint "$coverpoint0"
+
+// CHECK-LABEL: moore.module @constructor_inputs
+module constructor_inputs;
+  covergroup cg(int limit = 4) with function sample(int value);
+    coverpoint value;
+  endgroup
+  // CHECK: moore.covergroup.new : <@"constructor_inputs::cg">
+  cg coverage = new(4);
+  int calls;
+  function int next_limit();
+    calls++;
+    return calls;
+  endfunction
+  initial begin
+    // CHECK: moore.covergroup.sample {{.*}}({{.*}}) : <@"constructor_inputs::cg">(!moore.i32)
+    coverage.sample(1);
+    // CHECK: func.call @next_limit(
+    // CHECK: moore.covergroup.new : <@"constructor_inputs::cg">
+    coverage = new(next_limit());
+    // CHECK: moore.covergroup.new : <@"constructor_inputs::cg">
+    coverage = new();
+  end
+endmodule
+
+// CHECK-LABEL: moore.covergroup.decl @"constructor_inputs::cg"
+// CHECK-NEXT: ^bb0(%{{[^:]+}}: !moore.i32):
+// CHECK: moore.coverpoint "value"
