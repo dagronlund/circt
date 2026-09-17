@@ -12,11 +12,12 @@ endmodule
 // -----
 module top;
   bit clk;
-  // expected-error @below {{unsupported covergroup coverage event, inheritance, or options}}
   covergroup cg @(posedge clk);
     coverpoint clk;
   endgroup
-  cg coverage = new();
+  cg coverage;
+  // expected-error @below {{clocked covergroups require a module-level initializer}}
+  initial coverage = new();
 endmodule
 
 // -----
@@ -80,7 +81,7 @@ endmodule
 
 // -----
 module top;
-  // expected-error @below {{unsupported covergroup coverage event, inheritance, or options}}
+  // expected-error @below {{unsupported covergroup inheritance or options}}
   covergroup cg with function sample(int value);
     option.per_instance = 1;
     coverpoint value;

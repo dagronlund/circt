@@ -15,6 +15,7 @@
 #include "mlir/IR/Value.h"
 #include "slang/ast/EvalContext.h"
 #include "slang/ast/SystemSubroutine.h"
+#include "slang/ast/symbols/CoverSymbols.h"
 #include "slang/ast/types/AllTypes.h"
 #include "slang/syntax/AllSyntax.h"
 #include "llvm/ADT/ScopeExit.h"
@@ -1990,6 +1991,11 @@ struct RvalueExprVisitor : public ExprVisitor {
           return {};
         inputs.push_back(value);
       }
+      const auto &group = expr.thisClass()
+                              ->type->getCanonicalType()
+                              .as<slang::ast::CovergroupType>();
+      if (failed(context.appendCovergroupCaptures(group, inputs)))
+        return {};
       moore::CovergroupSampleOp::create(builder, loc, instance, inputs);
       return mlir::UnrealizedConversionCastOp::create(
                  builder, loc, moore::VoidType::get(context.getContext()),
@@ -2578,7 +2584,31 @@ struct RvalueExprVisitor : public ExprVisitor {
     for (const auto *arg : expr.arguments)
       if (!context.convertRvalueExpression(*arg))
         return {};
-    return moore::CovergroupNewOp::create(builder, loc, type);
+    const auto &group =
+        expr.type->getCanonicalType().as<slang::ast::CovergroupType>();
+    const auto *event = group.getCoverageEvent();
+    if (event && !isa<moore::SVModuleOp>(builder.getBlock()->getParentOp())) {
+      mlir::emitError(loc)
+          << "clocked covergroups require a module-level initializer";
+      return {};
+    }
+    auto instance = moore::CovergroupNewOp::create(builder, loc, type);
+    if (event) {
+      // Bind the sampling process to the allocated object, not the variable
+      // holding its handle: copying a handle must not add another sampler.
+      auto proc = moore::ProcedureOp::create(builder, loc,
+                                             moore::ProcedureKind::Always);
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToEnd(&proc.getBody().emplaceBlock());
+      if (failed(context.convertTimingControl(*event)))
+        return {};
+      SmallVector<Value> inputs;
+      if (failed(context.appendCovergroupCaptures(group, inputs)))
+        return {};
+      moore::CovergroupSampleOp::create(builder, loc, instance, inputs);
+      moore::ReturnOp::create(builder, loc);
+    }
+    return instance;
   }
 
   // A new class expression can stand for one of two things:
