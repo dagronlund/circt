@@ -3499,13 +3499,14 @@ Value Context::materializeConversion(Type type, Value value, bool isSigned,
     return moore::DivRealOp::create(builder, loc, asReal, scale);
   }
 
-  // Handle Int to String
-  if (isa<moore::StringType>(type)) {
-    if (auto intType = dyn_cast<moore::IntType>(value.getType())) {
-      if (intType.getDomain() == moore::Domain::FourValued)
-        value = moore::LogicToIntOp::create(builder, loc, value);
-      return moore::IntToStringOp::create(builder, loc, value);
-    }
+  // Convert packed values to a simple bit vector before converting to a string.
+  if (srcInt && isa<moore::StringType>(type)) {
+    value = materializePackedToSBVConversion(value, loc, fallible);
+    if (!value)
+      return {};
+    if (srcInt.getDomain() == moore::Domain::FourValued)
+      value = moore::LogicToIntOp::create(builder, loc, value);
+    return moore::IntToStringOp::create(builder, loc, value);
   }
 
   // Convert strings to a simple bit vector of the destination's full packed
