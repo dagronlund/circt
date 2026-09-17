@@ -276,3 +276,27 @@ moore.module @PackedStructArrayExtract() {
   }
   moore.output
 }
+
+// CHECK-LABEL: moore.module @PackedStructUnionExtract()
+// Choose a full-width union member, even when it is not the first member.
+// Project the shared storage once and preserve the enclosing struct offset.
+moore.module @PackedStructUnionExtract() {
+  %word = moore.variable : <struct<{payload: union<{short: i4, full: i8}>, tail: i4}>>
+  moore.procedure initial {
+    // CHECK: [[SRC:%.+]] = moore.constant 0 : i8
+    %src = moore.constant 0 : i8
+    %slice = moore.extract_ref %word from 2 : <struct<{payload: union<{short: i4, full: i8}>, tail: i4}>> -> <i8>
+    // CHECK: [[TAIL:%.+]] = moore.struct_extract_ref %word, "tail"
+    // CHECK: [[PAYLOAD:%.+]] = moore.struct_extract_ref %word, "payload"
+    // CHECK-NEXT: [[FULL:%.+]] = moore.union_extract_ref [[PAYLOAD]], "full"
+    // CHECK-NEXT: [[LOW:%.+]] = moore.extract_ref [[TAIL]] from 2 : <i4> -> <i2>
+    // CHECK-NEXT: [[HIGH:%.+]] = moore.extract_ref [[FULL]] from 0 : <i8> -> <i6>
+    // CHECK: [[HIGH_SRC:%.+]] = moore.extract [[SRC]] from 2 : i8 -> i6
+    // CHECK-NEXT: moore.blocking_assign [[HIGH]], [[HIGH_SRC]] : i6
+    // CHECK-NEXT: [[LOW_SRC:%.+]] = moore.extract [[SRC]] from 0 : i8 -> i2
+    // CHECK-NEXT: moore.blocking_assign [[LOW]], [[LOW_SRC]] : i2
+    moore.blocking_assign %slice, %src : i8
+    moore.return
+  }
+  moore.output
+}
