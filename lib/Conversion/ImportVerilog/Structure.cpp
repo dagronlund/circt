@@ -1744,6 +1744,15 @@ Context::convertModuleBody(const slang::ast::InstanceBodySymbol *module) {
           Value());
     } else {
       portValue = fp.arg;
+      // Like regular input ports, value-typed modport inputs need backing
+      // storage so functions and tasks can capture them by reference.
+      if (!isa<moore::RefType>(portValue.getType())) {
+        portValue = moore::VariableOp::create(
+            builder, fp.loc,
+            moore::RefType::get(cast<moore::UnpackedType>(fp.type)), fp.name,
+            Value());
+        moore::ContinuousAssignOp::create(builder, fp.loc, portValue, fp.arg);
+      }
     }
     valueSymbols.insert(valueSym, portValue);
     // Slang resolves in-body accesses (e.g. `bus.r`) through the

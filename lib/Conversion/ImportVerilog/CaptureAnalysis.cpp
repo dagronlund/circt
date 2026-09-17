@@ -174,17 +174,15 @@ struct CaptureWalker
   }
 
   /// Hierarchical references (`inst.var`) are captured like ordinary
-  /// non-local variables. Interface-port references are excluded: they are
-  /// handled by the interface lowering machinery, not as captures.
+  /// non-local variables, including flattened interface-port members.
   void handle(const HierarchicalValueExpression &expr) {
     if (!currentFunc)
-      return;
-    if (expr.ref.isViaIfacePort())
       return;
     auto &var = expr.symbol;
     if (isCompileTimeConstant(var.kind))
       return;
-    noteHierCapture(*currentFunc, var, getRootInstance(expr.ref));
+    if (!expr.ref.isViaIfacePort())
+      noteHierCapture(*currentFunc, var, getRootInstance(expr.ref));
     capturedVars[currentFunc].insert(&var);
   }
 
