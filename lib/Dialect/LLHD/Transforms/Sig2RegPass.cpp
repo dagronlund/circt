@@ -118,8 +118,8 @@ public:
                 if (bw <= 0)
                   return failure();
 
-                intervals.emplace_back(offset, bw, driveOp.getValue(),
-                                       timeOp.getValueAttr());
+                collectDriveIntervals(offset, driveOp.getValue(),
+                                      timeOp.getValueAttr());
                 return success();
               })
               .Case<llhd::SigExtractOp>([&](llhd::SigExtractOp extractOp) {
@@ -203,7 +203,7 @@ public:
       if (i >= intervals.size() - 1)
         break;
 
-      if (intervals[i].low.max + intervals[i].bitwidth - 1 >
+      if (intervals[i].low.max + intervals[i].bitwidth >
           intervals[i + 1].low.min) {
         LLVM_DEBUG({
           llvm::dbgs() << "  - Potentially overlapping drives, skipping...\n\n";
@@ -297,6 +297,35 @@ public:
   }
 
 private:
+  /// Mem2Reg expands partial assignments into read-modify-write operations.
+  /// Recover the written intervals of immediate combinational drives so that
+  /// unchanged bits do not hide other drivers or become SSA self-references.
+  void collectDriveIntervals(const Offset &offset, Value value,
+                             llhd::TimeAttr delay) {
+    if (offset.isStatic() && isImmediate(delay)) {
+      if (auto concat = value.getDefiningOp<comb::ConcatOp>()) {
+        uint64_t low = offset.min;
+        for (auto input : llvm::reverse(concat.getInputs())) {
+          collectDriveIntervals(Offset(low), input, delay);
+          low += hw::getBitWidth(input.getType());
+        }
+        return;
+      }
+
+      Value source = value;
+      uint64_t low = 0;
+      while (auto extract = source.getDefiningOp<comb::ExtractOp>()) {
+        low += extract.getLowBit();
+        source = extract.getInput();
+      }
+      if (auto probe = source.getDefiningOp<llhd::ProbeOp>())
+        if (probe.getSignal() == sigOp.getResult() && low == offset.min)
+          return;
+    }
+    intervals.emplace_back(offset, hw::getBitWidth(value.getType()), value,
+                           delay);
+  }
+
   /// Given a static offset and a list of dynamic offset values, materialize an
   /// SSA value that adds all these offsets together and is an integer with the
   /// given 'width'.

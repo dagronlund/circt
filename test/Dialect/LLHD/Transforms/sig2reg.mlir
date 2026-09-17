@@ -93,6 +93,7 @@ hw.module @aliasStatic(in %init : i4, in %in0 : i1, in %in1 : i1, out out: i4) {
   hw.output %5 : i4
 }
 
+// Leave a gap so that the conservative dynamic ranges do not overlap.
 // CHECK-LABEL: hw.module @aliasDynamicSuccess
 hw.module @aliasDynamicSuccess(in %init : i8, in %in0 : i1, in %in1 : i1, in %idx0 : i2, in %idx1 : i1, out out: i8) {
   // CHECK-NEXT: [[C1_I8:%.+]] = hw.constant 1 : i8
@@ -110,8 +111,8 @@ hw.module @aliasDynamicSuccess(in %init : i8, in %in0 : i1, in %in1 : i1, in %id
   // CHECK-NEXT: [[V7:%.+]] = comb.concat [[C0_I7]], %in0 : i7, i1
   // CHECK-NEXT: [[V8:%.+]] = comb.shl [[V7]], [[V3]] : i8
   // CHECK-NEXT: [[V9:%.+]] = comb.or [[V8]], [[V6]] : i8
-  // CHECK-NEXT: [[C4_I8:%.+]] = hw.constant 4 : i8
-  // CHECK-NEXT: [[V10:%.+]] = comb.add [[V0]], [[C4_I8]] : i8
+  // CHECK-NEXT: [[C5_I8:%.+]] = hw.constant 5 : i8
+  // CHECK-NEXT: [[V10:%.+]] = comb.add [[V0]], [[C5_I8]] : i8
   // CHECK-NEXT: [[V11:%.+]] = comb.shl [[C1_I8]], [[V10]] : i8
   // CHECK-NEXT: [[V12:%.+]] = comb.xor [[V11]], [[C_1_I8]] : i8
   // CHECK-NEXT: [[V13:%.+]] = comb.and [[V9]], [[V12]] : i8
@@ -120,6 +121,28 @@ hw.module @aliasDynamicSuccess(in %init : i8, in %in0 : i1, in %in1 : i1, in %id
   // CHECK-NEXT: [[V16:%.+]] = comb.or [[V15]], [[V13]] : i8
   // CHECK-NEXT: hw.output [[V16]] : i8
 
+  %0 = llhd.constant_time <0ns, 0d, 1e>
+  %c5_c3 = hw.constant 5 : i3
+  %c0_c3 = hw.constant 0 : i3
+  %out = llhd.sig %init : i8
+  %3 = llhd.sig.extract %out from %c0_c3 : <i8> -> <i4>
+  %4 = llhd.sig.extract %out from %c5_c3 : <i8> -> <i3>
+  %5 = llhd.sig.extract %3 from %idx0 : <i4> -> <i2>
+  %6 = llhd.sig.extract %5 from %idx1 : <i2> -> <i1>
+  %7 = llhd.sig.extract %4 from %idx0 : <i3> -> <i1>
+  llhd.drv %6, %in0 after %0 : i1
+  llhd.drv %7, %in1 after %0 : i1
+  %8 = llhd.prb %out : i8
+  hw.output %8 : i8
+}
+
+// The conservative ranges of the nested dynamic extracts meet at bit 4.
+// CHECK-LABEL: hw.module @aliasDynamicBoundaryOverlap
+// CHECK: llhd.sig
+// CHECK: llhd.drv
+// CHECK: llhd.drv
+// CHECK: hw.output
+hw.module @aliasDynamicBoundaryOverlap(in %init : i8, in %in0 : i1, in %in1 : i1, in %idx0 : i2, in %idx1 : i1, out out: i8) {
   %0 = llhd.constant_time <0ns, 0d, 1e>
   %c4_c3 = hw.constant 4 : i3
   %c0_c3 = hw.constant 0 : i3
