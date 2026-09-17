@@ -177,6 +177,14 @@ struct TypeVisitor {
     return moore::ChandleType::get(context.getContext());
   }
 
+  Type visit(const slang::ast::CovergroupType &type) {
+    auto decl = context.declareCovergroup(type);
+    if (!decl)
+      return {};
+    return moore::CovergroupHandleType::get(
+        context.getContext(), FlatSymbolRefAttr::get(decl.getSymNameAttr()));
+  }
+
   Type visit(const slang::ast::ClassType &type) {
     if (failed(context.buildClassProperties(type)))
       return {};

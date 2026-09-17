@@ -1968,6 +1968,30 @@ struct RvalueExprVisitor : public ExprVisitor {
   Value visitCall(const slang::ast::CallExpression &expr,
                   const slang::ast::SubroutineSymbol *subroutine) {
 
+    if (expr.thisClass() && expr.thisClass()->type->getCanonicalType().kind ==
+                                slang::ast::SymbolKind::CovergroupType) {
+      if (subroutine->name != "sample") {
+        mlir::emitError(loc)
+            << "unsupported covergroup method: " << subroutine->name;
+        return {};
+      }
+      auto instance = context.convertRvalueExpression(*expr.thisClass());
+      if (!instance)
+        return {};
+      SmallVector<Value> inputs;
+      for (auto *arg : expr.arguments()) {
+        auto value = context.convertRvalueExpression(*arg);
+        if (!value)
+          return {};
+        inputs.push_back(value);
+      }
+      moore::CovergroupSampleOp::create(builder, loc, instance, inputs);
+      return mlir::UnrealizedConversionCastOp::create(
+                 builder, loc, moore::VoidType::get(context.getContext()),
+                 ValueRange{})
+          .getResult(0);
+    }
+
     const bool isMethod = (subroutine->thisVar != nullptr);
 
     auto *lowering = context.declareFunction(*subroutine);
@@ -2483,6 +2507,13 @@ struct RvalueExprVisitor : public ExprVisitor {
     auto lastElement = moore::SubOp::create(builder, loc, queueSize, one);
 
     return lastElement;
+  }
+
+  Value visit(const slang::ast::NewCovergroupExpression &expr) {
+    auto type = context.convertType(*expr.type);
+    if (!type)
+      return {};
+    return moore::CovergroupNewOp::create(builder, loc, type);
   }
 
   // A new class expression can stand for one of two things:
@@ -3129,6 +3160,8 @@ Value Context::materializeConversion(Type type, Value value, bool isSigned,
   if (isa<moore::NullType>(value.getType())) {
     if (isa<moore::ChandleType>(type))
       return moore::NullChandleOp::create(builder, loc);
+    if (auto groupType = dyn_cast<moore::CovergroupHandleType>(type))
+      return moore::NullCovergroupOp::create(builder, loc, groupType);
     if (auto classType = dyn_cast<moore::ClassHandleType>(type))
       return moore::NullClassOp::create(builder, loc, classType);
     if (type == moore::IntType::getInt(value.getContext(), 1))

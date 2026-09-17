@@ -258,6 +258,8 @@ struct Context {
   LogicalResult defineFunction(const slang::ast::SubroutineSymbol &subroutine);
   LogicalResult
   convertPrimitiveInstance(const slang::ast::PrimitiveInstanceSymbol &prim);
+  moore::CovergroupDeclOp
+  declareCovergroup(const slang::ast::CovergroupType &group);
   ClassLowering *declareClass(const slang::ast::ClassType &cls);
   LogicalResult buildClassProperties(const slang::ast::ClassType &classdecl);
   LogicalResult materializeClassMethods(const slang::ast::ClassType &classdecl);
@@ -538,6 +540,9 @@ struct Context {
       std::pair<const slang::ast::EnumType *, slang::parsing::KnownSystemName>,
       mlir::func::FuncOp>
       enumHelpers;
+
+  DenseMap<const slang::ast::CovergroupType *, moore::CovergroupDeclOp>
+      covergroups;
 
   /// Classes that have already been converted.
   DenseMap<const slang::ast::ClassType *, std::unique_ptr<ClassLowering>>
