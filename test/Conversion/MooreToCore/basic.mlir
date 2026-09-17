@@ -1549,6 +1549,10 @@ func.func @UnreachableInFunction() {
 
 // CHECK-LABEL: @SimulationControl
 func.func @SimulationControl() {
+  // CHECK-NEXT: sim.assertion_control true
+  moore.builtin.assertion_control true
+  // CHECK-NEXT: sim.assertion_control false
+  moore.builtin.assertion_control false
   // CHECK-NOT: moore.builtin.finish_message
   moore.builtin.finish_message false
   moore.builtin.finish_message true

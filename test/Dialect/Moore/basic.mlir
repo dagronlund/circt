@@ -450,6 +450,10 @@ func.func @FormatStrings(%arg0: !moore.format_string, %arg1: !moore.i42, %arg2: 
 
 // CHECK-LABEL: func.func @SimulationControlBuiltins
 func.func @SimulationControlBuiltins() {
+  // CHECK: moore.builtin.assertion_control true
+  moore.builtin.assertion_control true
+  // CHECK: moore.builtin.assertion_control false
+  moore.builtin.assertion_control false
   // CHECK: moore.builtin.stop
   moore.builtin.stop
   // CHECK: moore.builtin.finish 42

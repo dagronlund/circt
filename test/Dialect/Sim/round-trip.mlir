@@ -71,6 +71,10 @@ func.func @SimulationControl() {
   // CHECK: sim.terminate failure, quiet
   sim.terminate failure, quiet
 
+  // CHECK: sim.assertion_control true
+  sim.assertion_control true
+  // CHECK: sim.assertion_control false
+  sim.assertion_control false
   // CHECK: sim.pause verbose
   sim.pause verbose
   // CHECK: sim.pause quiet

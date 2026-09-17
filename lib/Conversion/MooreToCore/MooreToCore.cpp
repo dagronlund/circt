@@ -3518,6 +3518,14 @@ struct ReadMemBIOpConversion : public OpConversionPattern<ReadMemBIOp> {
 // Simulation Control Conversion
 //===----------------------------------------------------------------------===//
 
+// moore.builtin.assertion_control -> sim.assertion_control
+static LogicalResult convert(AssertionControlBIOp op,
+                             AssertionControlBIOp::Adaptor adaptor,
+                             ConversionPatternRewriter &rewriter) {
+  rewriter.replaceOpWithNewOp<sim::AssertionControlOp>(op, op.getEnable());
+  return success();
+}
+
 // moore.builtin.stop -> sim.pause
 static LogicalResult convert(StopBIOp op, StopBIOp::Adaptor adaptor,
                              ConversionPatternRewriter &rewriter) {
@@ -4178,6 +4186,7 @@ static void populateOpConversion(ConversionPatternSet &patterns,
   patterns.add<GetGlobalVariableOp>(convert);
 
   // Simulation control
+  patterns.add<AssertionControlBIOp>(convert);
   patterns.add<StopBIOp>(convert);
   patterns.add<SeverityBIOp>(convert);
   patterns.add<FinishBIOp>(convert);
