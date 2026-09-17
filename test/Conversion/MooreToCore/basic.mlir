@@ -596,6 +596,20 @@ moore.module @Variable() {
   moore.output
 }
 
+// CHECK-LABEL: hw.module @StringNet
+moore.module @StringNet(in %value: !moore.string) {
+  // CHECK: [[EMPTY:%.+]] = sim.string.literal ""
+  // CHECK: %str = llhd.sig [[EMPTY]] : !sim.dstring
+  %str = moore.net wire : <string>
+
+  // CHECK: [[EMPTY:%.+]] = sim.string.literal ""
+  // CHECK: %assigned = llhd.sig [[EMPTY]] : !sim.dstring
+  // CHECK: [[TIME:%.+]] = llhd.constant_time <0ns, 0d, 1e>
+  // CHECK: llhd.drv %assigned, %value after [[TIME]] : !sim.dstring
+  %assigned = moore.net wire %value : <string>
+  moore.output
+}
+
 // CHECK-LABEL: hw.module @Net
 moore.module @Net() {
   // CHECK: [[TMP:%.+]] = hw.constant 0 : i32

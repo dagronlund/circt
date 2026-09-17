@@ -1167,12 +1167,18 @@ struct NetOpConversion : public OpConversionPattern<NetOp> {
       return rewriter.notifyMatchFailure(loc, "invalid net type");
 
     auto elementType = cast<llhd::RefType>(resultType).getNestedType();
-    int64_t width = hw::getBitWidth(elementType);
-    if (width == -1)
-      return failure();
-
-    auto init =
-        createInitialValue(op.getKind(), rewriter, loc, width, elementType);
+    Value init;
+    if (isa<sim::DynamicStringType>(elementType)) {
+      // String input ports can be nets. They have no fixed bit width and
+      // default to the empty string.
+      init = createZeroValue(elementType, loc, rewriter);
+    } else {
+      int64_t width = hw::getBitWidth(elementType);
+      if (width == -1)
+        return failure();
+      init =
+          createInitialValue(op.getKind(), rewriter, loc, width, elementType);
+    }
     auto signal = rewriter.replaceOpWithNewOp<llhd::SignalOp>(
         op, resultType, op.getNameAttr(), init);
 

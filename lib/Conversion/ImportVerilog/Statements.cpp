@@ -536,10 +536,15 @@ struct StmtVisitor {
           // Generate the appropriate equality operator. A case statement with
           // real operands uses ordinary equality (`==`) per IEEE 1800 § 11.4.5,
           // not case-equality; wildcard case kinds on reals are illegal SV.
+          // String operands also require their own equality operation.
           switch (caseStmt.condition) {
           case CaseStatementCondition::Normal:
             if (isa<moore::RealType>(caseExpr.getType()))
               cond = moore::EqRealOp::create(builder, itemLoc, caseExpr, value);
+            else if (isa<moore::StringType>(caseExpr.getType()))
+              cond = moore::StringCmpOp::create(builder, itemLoc,
+                                                moore::StringCmpPredicate::eq,
+                                                caseExpr, value);
             else
               cond = moore::CaseEqOp::create(builder, itemLoc, caseExpr, value);
             break;
