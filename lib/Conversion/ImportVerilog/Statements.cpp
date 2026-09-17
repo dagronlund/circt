@@ -1268,6 +1268,18 @@ struct StmtVisitor {
       return true;
     }
 
+    // Assertion control tasks.
+    if (nameId == ksn::AssertOn || nameId == ksn::AssertOff) {
+      if (!args.empty()) {
+        mlir::emitError(loc)
+            << "arguments to `" << subroutine.name << "` are not supported";
+        return failure();
+      }
+      moore::AssertionControlBIOp::create(builder, loc,
+                                          nameId == ksn::AssertOn);
+      return true;
+    }
+
     // Timescale tasks (`$printtimescale`)
 
     if (nameId == ksn::PrintTimeScale) {

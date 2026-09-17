@@ -42,6 +42,20 @@ function void SimulationControlBuiltins(bit x);
   $exit;
 endfunction
 
+// Argument-free assertion control tasks.
+// CHECK-LABEL: func.func private @AssertionControlBuiltins(
+function void AssertionControlBuiltins();
+  // CHECK-NEXT: moore.builtin.assertion_control true
+  $asserton;
+  // CHECK-NEXT: moore.builtin.assertion_control true
+  $asserton();
+  // CHECK-NEXT: moore.builtin.assertion_control false
+  $assertoff;
+  // CHECK-NEXT: moore.builtin.assertion_control false
+  $assertoff();
+  // CHECK-NEXT: return
+endfunction
+
 // IEEE 1800-2017 § 20.10 "Severity tasks"
 // IEEE 1800-2017 § 21.2 "Display system tasks"
 // CHECK-LABEL: func.func private @DisplayAndSeverityBuiltins(

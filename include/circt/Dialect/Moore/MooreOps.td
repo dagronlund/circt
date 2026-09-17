@@ -3295,6 +3295,18 @@ def TimeBIOp : Builtin<"time"> {
 // Simulation Control Builtins
 //===----------------------------------------------------------------------===//
 
+def AssertionControlBIOp : Builtin<"assertion_control"> {
+  let summary = "Enable or disable assertions";
+  let description = [{
+    Corresponds to the argument-free `$asserton` and `$assertoff` system tasks.
+    When executed, enables (`enable = true`) or disables (`enable = false`)
+    assertion checking throughout the simulation. Disabling does not terminate
+    assertion evaluations that are already in progress.
+  }];
+  let arguments = (ins BoolAttr:$enable);
+  let assemblyFormat = "$enable attr-dict";
+}
+
 def StopBIOp : Builtin<"stop"> {
   let summary = "Suspend simulation";
   let description = [{

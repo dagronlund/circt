@@ -1474,6 +1474,18 @@ def TerminateOp : SimOp<"terminate", [ProceduralOp]> {
   }];
 }
 
+def AssertionControlOp : SimOp<"assertion_control", [ProceduralOp]> {
+  let summary = "Enable or disable assertions during simulation";
+  let description = [{
+    Enables (`enable = true`) or disables (`enable = false`) assertion checking
+    throughout the simulation when this operation executes. This models the
+    argument-free SystemVerilog `$asserton` and `$assertoff` tasks. Disabling
+    does not terminate assertion evaluations that are already in progress.
+  }];
+  let arguments = (ins BoolAttr:$enable);
+  let assemblyFormat = "$enable attr-dict";
+}
+
 def PauseOp : SimOp<"pause", [ProceduralOp]> {
   let summary = "Pause the simulation";
   let description = [{
