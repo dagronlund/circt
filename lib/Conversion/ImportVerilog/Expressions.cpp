@@ -2108,6 +2108,14 @@ struct RvalueExprVisitor : public ExprVisitor {
     // argument will be found for variables captured from an outer scope).
     for (auto *sym : lowering->capturedSymbols) {
       Value val = context.valueSymbols.lookup(sym);
+      // Locally expanded interface members leave the scoped symbol table
+      // after expansion. Resolve them through their owning instance, keeping
+      // members of different instances separate even when they share a name.
+      if (!val)
+        if (auto *body = sym->getParentScope()->getContainingInstance())
+          if (body->parentInstance)
+            val = context.lookupExpandedInterfaceMember(*body->parentInstance,
+                                                        *sym);
       if (!val) {
         mlir::emitError(loc) << "failed to resolve captured variable `"
                              << sym->name << "` at call site";
