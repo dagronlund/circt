@@ -15,9 +15,10 @@
 // immediately has a value assigned via blocking assignment, replacing it with
 // moore.queue.set. Queue element references are tricky to lower into LLHD,
 // so it's best to get rid of them.
-// - To rewrite assignments to static or dynamic extracts of a packed struct,
-// e.g. "s[7:0] = v", into an assignment to a concatenation of the struct's
-// (possibly further sliced) fields, or guarded writes to individual field bits.
+// - To rewrite static extracts of packed-struct references into references to
+// their (possibly further sliced) fields, and dynamic assignments into guarded
+// writes to individual field bits. Reads of concatenated references become
+// concatenations of reads.
 //
 //===----------------------------------------------------------------------===//
 
@@ -102,6 +103,27 @@ struct ConcatRefLowering : public OpConversionPattern<OpTy> {
   }
 };
 
+struct ConcatRefReadLowering : public OpConversionPattern<ReadOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ReadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto concat = op.getInput().getDefiningOp<ConcatRefOp>();
+    if (!concat)
+      return failure();
+    SmallVector<Value> values;
+    for (auto ref : concat.getValues()) {
+      Value value = ReadOp::create(rewriter, op.getLoc(), ref);
+      if (!isa<IntType>(value.getType()))
+        value = PackedToSBVOp::create(rewriter, op.getLoc(), value);
+      values.push_back(value);
+    }
+    rewriter.replaceOpWithNewOp<ConcatOp>(op, values);
+    return success();
+  }
+};
+
 struct FieldInfo {
   Value field = nullptr;
   uint32_t size = 0;
@@ -158,26 +180,20 @@ static LogicalResult collectFields(Value ref, SmallVector<FieldInfo> &fields,
   return success();
 }
 
-template <typename OpTy>
-struct StructExtractLowering : public OpConversionPattern<OpTy> {
-  using OpConversionPattern<OpTy>::OpConversionPattern;
-  using OpAdaptor = typename OpTy::Adaptor;
+struct StructExtractLowering : public OpConversionPattern<ExtractRefOp> {
+  using OpConversionPattern::OpConversionPattern;
 
   LogicalResult
-  matchAndRewrite(OpTy op, OpAdaptor adaptor,
+  matchAndRewrite(ExtractRefOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    Value dst = op.getDst();
-
-    // We are specifically matching cases in which the LHS of the assignment is
-    // an ExtractRef operation on a struct.
-    auto extractRefOp = dyn_cast<ExtractRefOp>(dst.getDefiningOp());
-    auto baseStructType = dyn_cast_if_present<StructType>(
-        cast<RefType>(extractRefOp.getInput().getType()).getNestedType());
+    Value dst = op.getResult();
+    auto baseStructType = dyn_cast<StructType>(
+        cast<RefType>(op.getInput().getType()).getNestedType());
     if (!baseStructType)
-      return success();
+      return failure();
 
     // Get the boundaries of the ExtractOp.
-    uint32_t extractedLow = extractRefOp.getLowBit();
+    uint32_t extractedLow = op.getLowBit();
     auto targetWidth =
         cast<RefType>(dst.getType()).getNestedType().getBitSize();
     if (!targetWidth)
@@ -190,7 +206,7 @@ struct StructExtractLowering : public OpConversionPattern<OpTy> {
 
     // Collect all the fields of the struct.
     SmallVector<FieldInfo> fields;
-    if (failed(collectFields(extractRefOp.getInput(), fields, rewriter))) {
+    if (failed(collectFields(op.getInput(), fields, rewriter))) {
       return failure();
     }
 
@@ -233,12 +249,9 @@ struct StructExtractLowering : public OpConversionPattern<OpTy> {
             ? relevantFields.front()
             : Value(ConcatRefOp::create(rewriter, loc, relevantFields));
 
-    IRMapping mapping;
-    mapping.map(op.getDst(), finalRef);
-    rewriter.clone(*op.getOperation(), mapping);
-
-    rewriter.eraseOp(op);
-    rewriter.eraseOp(extractRefOp);
+    // Replace the reference itself so reads (including compound assignments)
+    // and any other users share the same field projections.
+    rewriter.replaceOp(op, finalRef);
     return success();
   }
 };
@@ -404,27 +417,15 @@ void SimplifyRefsPass::runOnOperation() {
   MLIRContext &context = getContext();
   ConversionTarget target(context);
 
-  target.addDynamicallyLegalOp<ContinuousAssignOp, BlockingAssignOp,
-                               NonBlockingAssignOp, DelayedContinuousAssignOp,
-                               DelayedNonBlockingAssignOp>([](auto op) {
-    auto extractRefOp =
-        op->getOperand(0).template getDefiningOp<ExtractRefOp>();
-    if (!extractRefOp)
-      return true;
-    auto nestedType =
-        cast<RefType>(extractRefOp.getInput().getType()).getNestedType();
-    return !isa<StructType>(nestedType);
+  target.addDynamicallyLegalOp<ExtractRefOp>([](ExtractRefOp op) {
+    return !isa<StructType>(
+        cast<RefType>(op.getInput().getType()).getNestedType());
   });
 
   target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 
   RewritePatternSet extractRefOnStructPatterns(&context);
-  extractRefOnStructPatterns
-      .add<StructExtractLowering<ContinuousAssignOp>,
-           StructExtractLowering<BlockingAssignOp>,
-           StructExtractLowering<NonBlockingAssignOp>,
-           StructExtractLowering<DelayedContinuousAssignOp>,
-           StructExtractLowering<DelayedNonBlockingAssignOp>>(&context);
+  extractRefOnStructPatterns.add<StructExtractLowering>(&context);
 
   if (failed(applyFullConversion(getOperation(), target,
                                  std::move(extractRefOnStructPatterns)))) {
@@ -446,6 +447,16 @@ void SimplifyRefsPass::runOnOperation() {
            StructDynExtractLowering<DelayedNonBlockingAssignOp>>(&context);
   if (failed(applyFullConversion(getOperation(), target,
                                  std::move(dynamicExtractPatterns)))) {
+    signalPassFailure();
+    return;
+  }
+
+  target.addDynamicallyLegalOp<ReadOp>(
+      [](ReadOp op) { return !op.getInput().getDefiningOp<ConcatRefOp>(); });
+  RewritePatternSet concatReadPatterns(&context);
+  concatReadPatterns.add<ConcatRefReadLowering>(&context);
+  if (failed(applyFullConversion(getOperation(), target,
+                                 std::move(concatReadPatterns)))) {
     signalPassFailure();
     return;
   }
