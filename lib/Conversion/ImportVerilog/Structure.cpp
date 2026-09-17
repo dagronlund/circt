@@ -309,63 +309,6 @@ struct ModuleVisitor : public BaseVisitor {
   ModuleVisitor(Context &context, Location loc, StringRef blockNamePrefix = "")
       : BaseVisitor(context, loc), blockNamePrefix(blockNamePrefix) {}
 
-  /// Connect an output value to a pattern of destinations. Slang binds each
-  /// element as `destination = EmptyArgument`, possibly with a conversion on
-  /// the RHS. The placeholder carries the source type; it is not an rvalue.
-  LogicalResult assignOutputPattern(
-      const slang::ast::SimpleAssignmentPatternExpression &pattern,
-      Value value) {
-    using namespace slang::ast;
-    auto patternLoc = context.convertLocation(pattern.sourceRange);
-    auto elements = pattern.elements();
-    for (auto [index, element] : llvm::enumerate(elements)) {
-      const auto &assignment = element->as<AssignmentExpression>();
-      assert(assignment.isLValueArg());
-      const Expression *source = &assignment.right();
-      if (auto *conversion = source->as_if<ConversionExpression>())
-        source = &conversion->operand();
-      auto elementType = context.convertType(*source->type);
-      if (!elementType)
-        return failure();
-
-      Value output;
-      if (auto type = dyn_cast<moore::StructType>(value.getType())) {
-        output = moore::StructExtractOp::create(
-            builder, patternLoc, elementType, type.getMembers()[index].name,
-            value);
-      } else if (auto type =
-                     dyn_cast<moore::UnpackedStructType>(value.getType())) {
-        output = moore::StructExtractOp::create(
-            builder, patternLoc, elementType, type.getMembers()[index].name,
-            value);
-      } else {
-        // Positional patterns follow declaration order. Moore stores the first
-        // declared element at the highest index, regardless of the SV bounds.
-        output = moore::ExtractOp::create(builder, patternLoc, elementType,
-                                          value, elements.size() - index - 1);
-      }
-
-      const auto &destination = assignment.left();
-      if (auto *nested =
-              destination.as_if<SimpleAssignmentPatternExpression>()) {
-        if (failed(assignOutputPattern(*nested, output)))
-          return failure();
-        continue;
-      }
-      auto lvalue = context.convertLvalueExpression(destination);
-      if (!lvalue)
-        return failure();
-      auto destinationType =
-          cast<moore::RefType>(lvalue.getType()).getNestedType();
-      output = context.materializeConversion(
-          destinationType, output, source->type->isSigned(), patternLoc);
-      if (!output)
-        return failure();
-      moore::ContinuousAssignOp::create(builder, patternLoc, lvalue, output);
-    }
-    return success();
-  }
-
   // Skip ports which are already handled by the module itself.
   LogicalResult visit(const slang::ast::PortSymbol &) { return success(); }
   LogicalResult visit(const slang::ast::MultiPortSymbol &) { return success(); }
@@ -864,11 +807,19 @@ struct ModuleVisitor : public BaseVisitor {
         context.hierValueSymbols[{&instNode, hierPath.hierName}] = result;
       }
 
-    for (auto &port : moduleLowering->ports)
-      if (auto *pattern = outputPatterns.lookup(&port.ast))
-        if (failed(assignOutputPattern(*pattern,
-                                       inst.getOutputs()[*port.outputIdx])))
+    for (auto &port : moduleLowering->ports) {
+      if (auto *pattern = outputPatterns.lookup(&port.ast)) {
+        auto patternLoc = context.convertLocation(pattern->sourceRange);
+        auto target = context.convertAssignmentTarget(*pattern);
+        if (failed(target) || failed(context.assignToTarget(
+                                  *target, inst.getOutputs()[*port.outputIdx],
+                                  patternLoc, [&](Value lhs, Value rhs) {
+                                    moore::ContinuousAssignOp::create(
+                                        builder, patternLoc, lhs, rhs);
+                                  })))
           return failure();
+      }
+    }
 
     // Assign output values from the instance to the connected expression.
     for (auto [lvalue, output] : llvm::zip(outputValues, inst.getOutputs())) {
@@ -937,32 +888,34 @@ struct ModuleVisitor : public BaseVisitor {
   LogicalResult visit(const slang::ast::ContinuousAssignSymbol &assignNode) {
     const auto &expr =
         assignNode.getAssignment().as<slang::ast::AssignmentExpression>();
-    auto lhs = context.convertLvalueExpression(expr.left());
-    if (!lhs)
+    auto target = context.convertAssignmentTarget(expr.left());
+    if (failed(target))
       return failure();
 
-    auto rhs = context.convertRvalueExpression(
-        expr.right(), cast<moore::RefType>(lhs.getType()).getNestedType());
+    auto rhs = context.convertRvalueExpression(expr.right(), target->type);
     if (!rhs)
       return failure();
 
-    // Handle delayed assignments.
+    // Evaluate the delay once for all destinations in a pattern.
+    Value delay;
     if (auto *timingCtrl = assignNode.getDelay()) {
       if (auto *ctrl = timingCtrl->as_if<slang::ast::DelayControl>()) {
-        auto delay = context.convertRvalueExpression(
+        delay = context.convertRvalueExpression(
             ctrl->expr, moore::TimeType::get(builder.getContext()));
         if (!delay)
           return failure();
-        moore::DelayedContinuousAssignOp::create(builder, loc, lhs, rhs, delay);
-        return success();
+      } else {
+        mlir::emitError(loc) << "unsupported delay with rise/fall/turn-off";
+        return failure();
       }
-      mlir::emitError(loc) << "unsupported delay with rise/fall/turn-off";
-      return failure();
     }
 
-    // Otherwise this is a regular assignment.
-    moore::ContinuousAssignOp::create(builder, loc, lhs, rhs);
-    return success();
+    return context.assignToTarget(*target, rhs, loc, [&](Value lhs, Value rhs) {
+      if (delay)
+        moore::DelayedContinuousAssignOp::create(builder, loc, lhs, rhs, delay);
+      else
+        moore::ContinuousAssignOp::create(builder, loc, lhs, rhs);
+    });
   }
 
   // Handle procedures.

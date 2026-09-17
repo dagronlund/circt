@@ -12,11 +12,11 @@ endmodule
 // CHECK-LABEL: moore.module @positional()
 // CHECK: %[[VALUES:.*]] = moore.variable : <l2>
 // CHECK: %[[BITS:.*]] = moore.instance "c" @bits_child
-// CHECK: %[[FIRST:.*]] = moore.extract %[[BITS]] from 1
 // CHECK: %[[LOW:.*]] = moore.extract_ref %[[VALUES]] from 0
+// CHECK: %[[HIGH:.*]] = moore.extract_ref %[[VALUES]] from 1
+// CHECK: %[[FIRST:.*]] = moore.extract %[[BITS]] from 1
 // CHECK-NEXT: moore.assign %[[LOW]], %[[FIRST]] : l1
 // CHECK: %[[SECOND:.*]] = moore.extract %[[BITS]] from 0
-// CHECK: %[[HIGH:.*]] = moore.extract_ref %[[VALUES]] from 1
 // CHECK-NEXT: moore.assign %[[HIGH]], %[[SECOND]] : l1
 module positional;
   logic [1:0] values;
@@ -42,11 +42,11 @@ endmodule
 // CHECK: %[[Y:.*]] = moore.variable : <l8>
 // CHECK: %[[Z:.*]] = moore.variable : <l2>
 // CHECK: %[[A:.*]] = moore.instance "c" @array_child
+// CHECK: %[[PART:.*]] = moore.extract_ref %[[Y]] from 0
 // CHECK-NEXT: %[[FIRST:.*]] = moore.extract %[[A]] from 2
 // CHECK-NEXT: %[[EXT:.*]] = moore.sext %[[FIRST]] : l4 -> l8
 // CHECK-NEXT: moore.assign %[[X]], %[[EXT]] : l8
 // CHECK-NEXT: %[[SECOND:.*]] = moore.extract %[[A]] from 1
-// CHECK-NEXT: %[[PART:.*]] = moore.extract_ref %[[Y]] from 0
 // CHECK-NEXT: moore.assign %[[PART]], %[[SECOND]] : l4
 // CHECK-NEXT: %[[THIRD:.*]] = moore.extract %[[A]] from 0
 // CHECK-NEXT: %[[TRUNC:.*]] = moore.trunc %[[THIRD]] : l4 -> l2
@@ -66,19 +66,19 @@ endmodule
 // CHECK-LABEL: moore.module @nested()
 // CHECK: %[[X:.*]] = moore.variable : <l16>
 // CHECK: %[[A:.*]] = moore.instance "c" @nested_child
+// CHECK: %[[D0:.*]] = moore.extract_ref %[[X]] from 0
+// CHECK: %[[D1:.*]] = moore.extract_ref %[[X]] from 4
+// CHECK: %[[D2:.*]] = moore.extract_ref %[[X]] from 8
+// CHECK: %[[D3:.*]] = moore.extract_ref %[[X]] from 12
 // CHECK-NEXT: %[[ROW0:.*]] = moore.extract %[[A]] from 1
 // CHECK-NEXT: %[[V0:.*]] = moore.extract %[[ROW0]] from 1
-// CHECK-NEXT: %[[D0:.*]] = moore.extract_ref %[[X]] from 0
 // CHECK-NEXT: moore.assign %[[D0]], %[[V0]] : l4
 // CHECK-NEXT: %[[V1:.*]] = moore.extract %[[ROW0]] from 0
-// CHECK-NEXT: %[[D1:.*]] = moore.extract_ref %[[X]] from 4
 // CHECK-NEXT: moore.assign %[[D1]], %[[V1]] : l4
 // CHECK-NEXT: %[[ROW1:.*]] = moore.extract %[[A]] from 0
 // CHECK-NEXT: %[[V2:.*]] = moore.extract %[[ROW1]] from 1
-// CHECK-NEXT: %[[D2:.*]] = moore.extract_ref %[[X]] from 8
 // CHECK-NEXT: moore.assign %[[D2]], %[[V2]] : l4
 // CHECK-NEXT: %[[V3:.*]] = moore.extract %[[ROW1]] from 0
-// CHECK-NEXT: %[[D3:.*]] = moore.extract_ref %[[X]] from 12
 // CHECK-NEXT: moore.assign %[[D3]], %[[V3]] : l4
 module nested;
   logic [15:0] x;
@@ -134,11 +134,11 @@ endmodule
 // CHECK-LABEL: moore.module @packed_array()
 // CHECK: %[[D:.*]] = moore.variable : <uarray<2 x l4>>
 // CHECK: %[[A:.*]] = moore.instance "c" @packed_child
+// CHECK: %[[D0:.*]] = moore.extract_ref %[[D]] from 1
+// CHECK: %[[D1:.*]] = moore.extract_ref %[[D]] from 0
 // CHECK-NEXT: %[[V0:.*]] = moore.extract %[[A]] from 1 : array<2 x l4> -> l4
-// CHECK-NEXT: %[[D0:.*]] = moore.extract_ref %[[D]] from 1
 // CHECK-NEXT: moore.assign %[[D0]], %[[V0]] : l4
 // CHECK-NEXT: %[[V1:.*]] = moore.extract %[[A]] from 0 : array<2 x l4> -> l4
-// CHECK-NEXT: %[[D1:.*]] = moore.extract_ref %[[D]] from 0
 // CHECK-NEXT: moore.assign %[[D1]], %[[V1]] : l4
 module packed_array;
   logic [3:0] d[9:10];
