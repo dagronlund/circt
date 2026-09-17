@@ -12,6 +12,7 @@
 #include "circt/Dialect/HW/HWTypeInterfaces.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
+#include "circt/Dialect/LTL/LTLOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -319,6 +320,20 @@ private:
 
 /// Try to lower the process to a set of registers.
 void Deseq::deseq() {
+  // Sampled history must retain the actual clock waveform. Specializing the
+  // process for a clock edge would otherwise replace that clock with a
+  // constant. Hoist past ops whose operands are already outside the process,
+  // and leave processes with local history dependencies for a later lowering.
+  SmallVector<ltl::PastOp> pastOps;
+  process.walk([&](ltl::PastOp op) { pastOps.push_back(op); });
+  for (auto op : pastOps)
+    if (!llvm::all_of(op->getOperands(), [&](Value operand) {
+          return !process.getBody().isAncestor(operand.getParentRegion());
+        }))
+      return;
+  for (auto op : pastOps)
+    op->moveBefore(process);
+
   // Check whether the process meets the basic criteria for being replaced by a
   // register. This includes having only a single `llhd.wait` op and feeding
   // only particular kinds of `llhd.drv` ops.
