@@ -227,6 +227,27 @@ struct StructExtractLowering : public OpConversionPattern<OpTy> {
   }
 };
 
+// Read a dynamic packed-struct slice through its packed bit-vector value.
+struct StructDynExtractReadLowering : public OpConversionPattern<ReadOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ReadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto extract = op.getInput().getDefiningOp<DynExtractRefOp>();
+    if (!extract ||
+        !isa<StructType>(
+            cast<RefType>(extract.getInput().getType()).getNestedType()))
+      return failure();
+
+    Value value = ReadOp::create(rewriter, op.getLoc(), extract.getInput());
+    value = PackedToSBVOp::create(rewriter, op.getLoc(), value);
+    rewriter.replaceOpWithNewOp<DynExtractOp>(op, op.getType(), value,
+                                              extract.getLowBit());
+    return success();
+  }
+};
+
 // Scatter a dynamic packed-struct slice into guarded writes to individual
 // field bits. Do not read-modify-write the whole struct: nonblocking
 // assignments to disjoint slices must not overwrite each other's updates.
@@ -423,11 +444,17 @@ void SimplifyRefsPass::runOnOperation() {
            !isa<StructType>(
                cast<RefType>(extract.getInput().getType()).getNestedType());
   });
+  target.addDynamicallyLegalOp<ReadOp>([](ReadOp op) {
+    auto extract = op.getInput().getDefiningOp<DynExtractRefOp>();
+    return !extract ||
+           !isa<StructType>(
+               cast<RefType>(extract.getInput().getType()).getNestedType());
+  });
   RewritePatternSet dynamicExtractPatterns(&context);
-  dynamicExtractPatterns
-      .add<StructDynExtractLowering<BlockingAssignOp>,
-           StructDynExtractLowering<NonBlockingAssignOp>,
-           StructDynExtractLowering<DelayedNonBlockingAssignOp>>(&context);
+  dynamicExtractPatterns.add<
+      StructDynExtractReadLowering, StructDynExtractLowering<BlockingAssignOp>,
+      StructDynExtractLowering<NonBlockingAssignOp>,
+      StructDynExtractLowering<DelayedNonBlockingAssignOp>>(&context);
   if (failed(applyFullConversion(getOperation(), target,
                                  std::move(dynamicExtractPatterns)))) {
     signalPassFailure();
