@@ -69,8 +69,12 @@ void Lowering::lower() {
 
   // Simplify the execute op body region since disconnecting the control flow
   // loop through the wait op has potentially created unreachable blocks.
+  // Do not merge identical blocks here: repeated diamonds (for example from
+  // inlined packed-struct slice writes) can introduce exponentially many block
+  // arguments. Leave control flow folding to the subsequent canonicalizer.
   IRRewriter rewriter(builder);
-  (void)simplifyRegions(rewriter, executeOp->getRegions());
+  (void)simplifyRegions(rewriter, executeOp->getRegions(),
+                        /*mergeBlocks=*/false);
 }
 
 /// Check that the process' entry block trivially joins a control flow loop
