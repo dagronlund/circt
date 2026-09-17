@@ -1617,8 +1617,11 @@ LogicalResult AddOp::canonicalize(AddOp op, PatternRewriter &rewriter) {
     return success();
 
   // add(add(x, c1), c2) -> add(x, c1 + c2)
+  // Unreachable blocks may contain a self-referencing inner add. Folding its
+  // constant into the outer add would keep matching without making progress.
   auto addOp = inputs[0].getDefiningOp<comb::AddOp>();
-  if (addOp && addOp.getInputs().size() == 2 &&
+  if (addOp && !isOpTriviallyRecursive(addOp) &&
+      addOp.getInputs().size() == 2 &&
       matchPattern(addOp.getInputs()[1], m_ConstantInt(&value2)) &&
       inputs.size() == 2 && matchPattern(inputs[1], m_ConstantInt(&value))) {
 
