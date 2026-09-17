@@ -12,7 +12,7 @@ endmodule
 // -----
 module top;
   bit clk;
-  // expected-error @below {{unsupported covergroup constructor arguments, coverage event, inheritance, or options}}
+  // expected-error @below {{unsupported covergroup coverage event, inheritance, or options}}
   covergroup cg @(posedge clk);
     coverpoint clk;
   endgroup
@@ -42,8 +42,8 @@ endmodule
 
 // -----
 module top;
-  // expected-error @below {{unsupported covergroup constructor arguments, coverage event, inheritance, or options}}
   covergroup cg(int arg);
+    // expected-error @below {{unsupported coverpoint expression: expected sample inputs and constants}}
     coverpoint arg;
   endgroup
   cg coverage = new(1);
@@ -80,10 +80,29 @@ endmodule
 
 // -----
 module top;
-  // expected-error @below {{unsupported covergroup constructor arguments, coverage event, inheritance, or options}}
+  // expected-error @below {{unsupported covergroup coverage event, inheritance, or options}}
   covergroup cg with function sample(int value);
     option.per_instance = 1;
     coverpoint value;
   endgroup
   cg coverage = new();
+endmodule
+
+// -----
+module top;
+  int limit;
+  // expected-error @below {{unsupported covergroup constructor argument direction}}
+  covergroup cg(ref int arg) with function sample(int value);
+    coverpoint value;
+  endgroup
+  cg coverage = new(limit);
+endmodule
+
+// -----
+module top;
+  covergroup cg(int limit) with function sample(int value);
+    // expected-error @below {{unsupported coverpoint expression: expected sample inputs and constants}}
+    coverpoint value iff (value < limit);
+  endgroup
+  cg coverage = new(4);
 endmodule

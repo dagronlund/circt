@@ -161,6 +161,153 @@ private:
   llvm::StringMap<func::FuncOp> map;
 };
 
+/// Each instance owns 64 counters per coverpoint. Narrow coverpoints use only
+/// the first 2^width counters. Keeping a fixed stride makes the layout
+/// independent of the signedness and width of the sampled expression.
+struct CovergroupLowering {
+  struct Group {
+    StringAttr sampleName;
+    uint64_t numCounters;
+  };
+  DenseMap<Attribute, Group> groups;
+  DenseMap<Operation *, uint64_t> pointOffsets;
+
+  void prepare(ModuleOp module, SymbolTable &symbols,
+               FunctionCache &functions) {
+    OpBuilder builder(module.getContext());
+    auto ptrTy = LLVM::LLVMPointerType::get(module.getContext());
+    for (auto decl :
+         llvm::make_early_inc_range(module.getOps<CovergroupDeclOp>())) {
+      builder.setInsertionPoint(decl);
+      SmallVector<Type> inputs{ptrTy};
+      llvm::append_range(inputs, decl.getBody().front().getArgumentTypes());
+      auto fn = func::FuncOp::create(builder, decl.getLoc(),
+                                     decl.getSymName().str() + "::sample",
+                                     builder.getFunctionType(inputs, {}));
+      fn.setPrivate();
+      symbols.insert(fn);
+      fn.getBody().takeBody(decl.getBody());
+      auto &body = fn.getBody().front();
+      auto instance = body.insertArgument(0u, ptrTy, decl.getLoc());
+      uint64_t numCounters = 0;
+      for (auto point : body.getOps<CoverpointOp>()) {
+        pointOffsets[point] = numCounters;
+        numCounters += 64;
+      }
+      groups[FlatSymbolRefAttr::get(decl.getSymNameAttr())] = {
+          fn.getSymNameAttr(), std::max(uint64_t(1), numCounters)};
+
+      // Check the handle even for an empty group or disabled coverpoints.
+      builder.setInsertionPointToStart(&body);
+      auto null = LLVM::ZeroOp::create(builder, decl.getLoc(), ptrTy);
+      auto isNull = LLVM::ICmpOp::create(
+          builder, decl.getLoc(), LLVM::ICmpPredicate::eq, instance, null);
+      auto check = scf::IfOp::create(builder, decl.getLoc(), isNull, false);
+      builder.setInsertionPointToStart(&check.getThenRegion().front());
+      auto abortFn = functions.getOrCreate(builder, "abort", {}, {});
+      func::CallOp::create(builder, decl.getLoc(), abortFn);
+      builder.setInsertionPointToEnd(&body);
+      func::ReturnOp::create(builder, decl.getLoc());
+      symbols.erase(decl);
+    }
+  }
+};
+
+struct CovergroupNewOpConversion : OpConversionPattern<CovergroupNewOp> {
+  CovergroupNewOpConversion(TypeConverter &tc, MLIRContext *ctx,
+                            CovergroupLowering &coverage,
+                            FunctionCache &functions)
+      : OpConversionPattern(tc, ctx), coverage(coverage), functions(functions) {
+  }
+
+  LogicalResult
+  matchAndRewrite(CovergroupNewOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto info = coverage.groups.lookup(op.getType().getGroup());
+    auto ptrTy = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i64 = rewriter.getI64Type();
+    auto count =
+        LLVM::ConstantOp::create(rewriter, op.getLoc(), i64,
+                                 rewriter.getI64IntegerAttr(info.numCounters));
+    auto size = LLVM::ConstantOp::create(rewriter, op.getLoc(), i64,
+                                         rewriter.getI64IntegerAttr(8));
+    auto callocFn =
+        functions.getOrCreate(rewriter, "calloc", {i64, i64}, {ptrTy});
+    rewriter.replaceOpWithNewOp<func::CallOp>(op, callocFn,
+                                              ValueRange{count, size});
+    return success();
+  }
+  CovergroupLowering &coverage;
+  FunctionCache &functions;
+};
+
+struct CovergroupSampleOpConversion : OpConversionPattern<CovergroupSampleOp> {
+  CovergroupSampleOpConversion(TypeConverter &tc, MLIRContext *ctx,
+                               CovergroupLowering &coverage)
+      : OpConversionPattern(tc, ctx), coverage(coverage) {}
+
+  LogicalResult
+  matchAndRewrite(CovergroupSampleOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto info = coverage.groups.lookup(op.getInstance().getType().getGroup());
+    SmallVector<Value> inputs{adaptor.getInstance()};
+    llvm::append_range(inputs, adaptor.getInputs());
+    rewriter.replaceOpWithNewOp<func::CallOp>(op, info.sampleName.getValue(),
+                                              TypeRange{}, inputs);
+    return success();
+  }
+  CovergroupLowering &coverage;
+};
+
+struct CoverpointOpConversion : OpConversionPattern<CoverpointOp> {
+  CoverpointOpConversion(TypeConverter &tc, MLIRContext *ctx,
+                         CovergroupLowering &coverage)
+      : OpConversionPattern(tc, ctx), coverage(coverage) {}
+
+  LogicalResult
+  matchAndRewrite(CoverpointOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto instance = op->getParentOfType<func::FuncOp>().getArgument(0);
+    auto enabled = scf::IfOp::create(rewriter, loc, adaptor.getEnable(), false);
+    rewriter.setInsertionPointToStart(&enabled.getThenRegion().front());
+
+    // Automatic bins partition the entire integral range into min(2^width, 64)
+    // equal intervals. The high six bits select a bin for wider values.
+    // Flipping the sign bit maps signed order to unsigned order before
+    // selecting the bin.
+    Value bin = adaptor.getValue();
+    unsigned width = bin.getType().getIntOrFloatBitWidth();
+    if (op.getIsSigned()) {
+      auto sign =
+          hw::ConstantOp::create(rewriter, loc, APInt::getSignMask(width));
+      bin = comb::XorOp::create(rewriter, loc, bin, sign);
+    }
+    if (width > 6)
+      bin = comb::ExtractOp::create(rewriter, loc, bin, width - 6, 6);
+    bin = arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(), bin);
+    auto offset = arith::ConstantIntOp::create(
+        rewriter, loc, coverage.pointOffsets.lookup(op), 64);
+    bin = arith::AddIOp::create(rewriter, loc, bin, offset);
+    auto address =
+        LLVM::GEPOp::create(rewriter, loc, instance.getType(),
+                            rewriter.getI64Type(), instance, ValueRange{bin});
+    auto count =
+        LLVM::LoadOp::create(rewriter, loc, rewriter.getI64Type(), address);
+    auto one = arith::ConstantIntOp::create(rewriter, loc, 1, 64);
+    auto next = arith::AddIOp::create(rewriter, loc, count, one);
+    // Saturate rather than wrapping a hit counter back to zero.
+    auto max = arith::ConstantIntOp::create(rewriter, loc, -1, 64);
+    auto full = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                      count, max);
+    auto updated = arith::SelectOp::create(rewriter, loc, full, count, next);
+    LLVM::StoreOp::create(rewriter, loc, updated, address);
+    rewriter.eraseOp(op);
+    return success();
+  }
+  CovergroupLowering &coverage;
+};
+
 /// Helper function to create an opaque LLVM Struct Type which corresponds
 /// to the sym
 static LLVM::LLVMStructType getOrCreateOpaqueStruct(MLIRContext *ctx,
@@ -3837,6 +3984,10 @@ static void populateTypeConversion(TypeConverter &typeConverter) {
     return LLVM::LLVMPointerType::get(type.getContext());
   });
 
+  typeConverter.addConversion([](CovergroupHandleType type) -> Type {
+    return LLVM::LLVMPointerType::get(type.getContext());
+  });
+
   // NullType -> !llvm.ptr
   typeConverter.addConversion([&](NullType type) -> std::optional<Type> {
     return LLVM::LLVMPointerType::get(type.getContext());
@@ -3939,6 +4090,7 @@ static void populateOpConversion(ConversionPatternSet &patterns,
     NullOpConversion<NullOp>,
     NullOpConversion<NullChandleOp>,
     NullOpConversion<NullClassOp>,
+    NullOpConversion<NullCovergroupOp>,
     // Patterns of declaration operations.
     VariableOpConversion,
     NetOpConversion,
@@ -4229,11 +4381,18 @@ void MooreToCorePass::runOnOperation() {
   TypeConverter typeConverter;
   populateTypeConversion(typeConverter);
 
+  CovergroupLowering coverage;
+  coverage.prepare(module, symbolTable, funcCache);
+
   ConversionTarget target(context);
   populateLegality(target, typeConverter);
 
   ConversionPatternSet patterns(&context, typeConverter);
   populateOpConversion(patterns, typeConverter, classCache, funcCache);
+  patterns.add<CovergroupNewOpConversion>(typeConverter, &context, coverage,
+                                          funcCache);
+  patterns.add<CovergroupSampleOpConversion, CoverpointOpConversion>(
+      typeConverter, &context, coverage);
   mlir::cf::populateCFStructuralTypeConversionsAndLegality(typeConverter,
                                                            patterns, target);
 

@@ -2513,6 +2513,10 @@ struct RvalueExprVisitor : public ExprVisitor {
     auto type = context.convertType(*expr.type);
     if (!type)
       return {};
+    // Even unused constructor inputs must be evaluated for their side effects.
+    for (const auto *arg : expr.arguments)
+      if (!context.convertRvalueExpression(*arg))
+        return {};
     return moore::CovergroupNewOp::create(builder, loc, type);
   }
 
