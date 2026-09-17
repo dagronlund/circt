@@ -210,3 +210,32 @@ moore.module @PackedStructExtractRange() {
     moore.return
   }
 }
+
+// CHECK-LABEL: moore.module @PackedStructSharedExtract()
+// The same slice is read and written twice, and spans two struct fields.
+moore.module @PackedStructSharedExtract() {
+  %word = moore.variable : <struct<{upper: i4, lower: i4}>>
+  moore.procedure initial {
+    // CHECK: [[LOWER:%.+]] = moore.struct_extract_ref %word, "lower"
+    // CHECK: [[UPPER:%.+]] = moore.struct_extract_ref %word, "upper"
+    // CHECK: [[LO:%.+]] = moore.extract_ref [[LOWER]] from 2 : <i4> -> <i2>
+    // CHECK: [[HI:%.+]] = moore.extract_ref [[UPPER]] from 0 : <i4> -> <i2>
+    %slice = moore.extract_ref %word from 2 : <struct<{upper: i4, lower: i4}>> -> <i4>
+    // CHECK: [[HI_READ:%.+]] = moore.read [[HI]] : <i2>
+    // CHECK: [[LO_READ:%.+]] = moore.read [[LO]] : <i2>
+    // CHECK: [[READ:%.+]] = moore.concat [[HI_READ]], [[LO_READ]] : (!moore.i2, !moore.i2) -> i4
+    %old = moore.read %slice : <i4>
+    %mask = moore.constant 15 : i4
+    // CHECK: [[NEW:%.+]] = moore.xor [[READ]], %{{.+}} : i4
+    %new = moore.xor %old, %mask : i4
+    // CHECK: [[HI_NEW:%.+]] = moore.extract [[NEW]] from 2 : i4 -> i2
+    // CHECK: moore.blocking_assign [[HI]], [[HI_NEW]] : i2
+    // CHECK: [[LO_NEW:%.+]] = moore.extract [[NEW]] from 0 : i4 -> i2
+    // CHECK: moore.blocking_assign [[LO]], [[LO_NEW]] : i2
+    moore.blocking_assign %slice, %new : i4
+    // CHECK: moore.blocking_assign [[HI]],
+    // CHECK: moore.blocking_assign [[LO]],
+    moore.blocking_assign %slice, %old : i4
+    moore.return
+  }
+}
