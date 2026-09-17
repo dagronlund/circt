@@ -544,6 +544,15 @@ struct Context {
   DenseMap<const slang::ast::CovergroupType *, moore::CovergroupDeclOp>
       covergroups;
 
+  /// Module signals passed as implicit inputs when sampling clocked groups.
+  DenseMap<const slang::ast::CovergroupType *,
+           SmallVector<const slang::ast::NamedValueExpression *>>
+      covergroupCaptures;
+
+  LogicalResult
+  appendCovergroupCaptures(const slang::ast::CovergroupType &group,
+                           SmallVectorImpl<Value> &inputs);
+
   /// Classes that have already been converted.
   DenseMap<const slang::ast::ClassType *, std::unique_ptr<ClassLowering>>
       classes;

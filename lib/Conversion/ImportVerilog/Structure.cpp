@@ -2808,16 +2808,23 @@ struct ClassMethodVisitor : ClassDeclVisitorBase {
 } // namespace
 
 namespace {
-/// This first lowering supports expressions of sample inputs and constants.
-/// Captured module/class state requires per-instance bindings on construction.
+/// Check sample expressions and collect module signals for clocked groups.
 struct CoverpointExprChecker
     : slang::ast::ASTVisitor<CoverpointExprChecker,
                              slang::ast::VisitFlags::Expressions> {
+  const slang::ast::Scope *captureScope = nullptr;
+  SmallVector<const slang::ast::NamedValueExpression *> captures;
   bool supported = true;
   void handle(const slang::ast::NamedValueExpression &expr) {
     if (expr.symbol.kind == slang::ast::SymbolKind::Parameter ||
         expr.symbol.kind == slang::ast::SymbolKind::EnumValue)
       return;
+    if (captureScope && expr.symbol.getParentScope() == captureScope &&
+        (expr.symbol.kind == slang::ast::SymbolKind::Variable ||
+         expr.symbol.kind == slang::ast::SymbolKind::Net)) {
+      captures.push_back(&expr);
+      return;
+    }
     auto *arg = expr.symbol.as_if<slang::ast::FormalArgumentSymbol>();
     if (!arg || !(arg->flags & slang::ast::VariableFlags::CoverageSampleFormal))
       supported = false;
@@ -2835,11 +2842,8 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     return op;
   auto loc = convertLocation(group.location);
   const auto &body = group.getBody();
-  if (group.getCoverageEvent() || group.getBaseGroup() ||
-      !body.options.empty()) {
-    mlir::emitError(loc)
-        << "unsupported covergroup coverage event, inheritance, "
-           "or options";
+  if (group.getBaseGroup() || !body.options.empty()) {
+    mlir::emitError(loc) << "unsupported covergroup inheritance or options";
     return {};
   }
   for (const auto *arg : group.getArguments()) {
@@ -2916,6 +2920,9 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
       return {};
     }
     CoverpointExprChecker checker;
+    if (group.getCoverageEvent() && group.getParentScope()->asSymbol().kind ==
+                                        slang::ast::SymbolKind::InstanceBody)
+      checker.captureScope = group.getParentScope();
     point->getCoverageExpr().visit(checker);
     if (auto *iff = point->getIffExpr())
       iff->visit(checker);
@@ -2923,6 +2930,24 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
       mlir::emitError(pointLoc) << "unsupported coverpoint expression: "
                                    "expected sample inputs and constants";
       return {};
+    }
+    auto &captures = covergroupCaptures[&group];
+    for (const auto *expr : checker.captures) {
+      if (llvm::any_of(captures, [&](const auto *previous) {
+            return &previous->symbol == &expr->symbol;
+          }))
+        continue;
+      auto type =
+          dyn_cast_or_null<moore::UnpackedType>(convertType(*expr->type));
+      if (!type)
+        return {};
+      auto captureLoc = convertLocation(expr->sourceRange);
+      auto input = block.addArgument(type, captureLoc);
+      auto var = moore::VariableOp::create(
+          builder, captureLoc, moore::RefType::get(type),
+          builder.getStringAttr(expr->symbol.name), input);
+      valueSymbols.insert(&expr->symbol, var);
+      captures.push_back(expr);
     }
     auto value = convertRvalueExpression(point->getCoverageExpr());
     if (!value)
@@ -2951,6 +2976,18 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
   }
   covergroups[&group] = decl;
   return decl;
+}
+
+LogicalResult
+Context::appendCovergroupCaptures(const slang::ast::CovergroupType &group,
+                                  SmallVectorImpl<Value> &inputs) {
+  for (const auto *expr : covergroupCaptures[&group]) {
+    auto value = convertRvalueExpression(*expr);
+    if (!value)
+      return failure();
+    inputs.push_back(value);
+  }
+  return success();
 }
 
 ClassLowering *Context::declareClass(const slang::ast::ClassType &cls) {
