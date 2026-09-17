@@ -109,7 +109,7 @@ struct FieldInfo {
 };
 
 // Collect integer leaves in increasing storage-bit order, descending through
-// both nested structs and packed arrays.
+// nested structs, packed arrays, and one full-width view of each packed union.
 static LogicalResult collectFields(Value ref, SmallVector<FieldInfo> &fields,
                                    ConversionPatternRewriter &rewriter,
                                    uint32_t initialOffset = 0) {
@@ -139,9 +139,19 @@ static LogicalResult collectFields(Value ref, SmallVector<FieldInfo> &fields,
                                initialOffset + i * elementSize)))
         return failure();
     }
-  } else if (isa<UnionType>(type)) {
+  } else if (auto unionType = dyn_cast<UnionType>(type)) {
+    // Union members alias the same storage. Descend through a single member
+    // covering the entire union so each storage bit is written exactly once.
+    for (auto &member : unionType.getMembers()) {
+      if (member.type.getBitSize() != size)
+        continue;
+      auto memberRef = UnionExtractRefOp::create(
+          rewriter, ref.getLoc(), RefType::get(member.type), member.name, ref);
+      return collectFields(memberRef, fields, rewriter, initialOffset);
+    }
     return mlir::emitError(ref.getLoc())
-           << "unsupported: union member in struct flattening";
+           << "unsupported: union without a full-width member in struct "
+              "flattening";
   } else {
     fields.push_back({ref, *size, initialOffset});
   }
