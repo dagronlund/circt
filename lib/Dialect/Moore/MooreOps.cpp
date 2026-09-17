@@ -19,6 +19,7 @@
 #include "mlir/Interfaces/FunctionImplementation.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include <mlir/Dialect/Func/IR/FuncOps.h>
@@ -1506,6 +1507,16 @@ LogicalResult CovergroupDeclOp::verify() {
   for (auto point : getBody().front().getOps<CoverpointOp>())
     if (point.getName().empty() || !names.insert(point.getName()).second)
       return emitOpError("coverpoint names must be nonempty and unique");
+  llvm::StringMap<llvm::StringSet<>> bins;
+  for (auto bin : getBody().front().getOps<CoverBinOp>()) {
+    if (bin.getPoint().empty() || bin.getName().empty() ||
+        !bins[bin.getPoint()].insert(bin.getName()).second)
+      return emitOpError(
+          "explicit bin names must be nonempty and unique within "
+          "a nonempty coverpoint name");
+    if (names.contains(bin.getPoint()))
+      return emitOpError("coverpoints cannot mix automatic and explicit bins");
+  }
   return success();
 }
 

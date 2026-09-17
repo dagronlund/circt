@@ -2719,6 +2719,19 @@ def CoverpointOp : MooreOp<"coverpoint", [HasParent<"CovergroupDeclOp">]> {
   let assemblyFormat = "$name $value `if` $enable attr-dict `:` type($value)";
 }
 
+def CoverBinOp : MooreOp<"coverbin", [HasParent<"CovergroupDeclOp">]> {
+  let summary = "Record a hit on an explicit scalar coverage bin";
+  let description = [{
+    When hit is true, increments this bin's instance counter, or reports a
+    runtime error if illegal is set. The importer computes hit from the bin's
+    value set and the coverpoint's sampling condition. Explicit bins replace
+    automatic binning for their coverpoint.
+  }];
+  let arguments = (ins StrAttr:$point, StrAttr:$name, BitType:$hit,
+                       UnitAttr:$illegal);
+  let assemblyFormat = "$point $name `if` $hit attr-dict";
+}
+
 //===----------------------------------------------------------------------===//
 // Assertions
 //===----------------------------------------------------------------------===//

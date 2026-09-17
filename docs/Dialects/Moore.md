@@ -25,13 +25,18 @@ instance, and `moore.covergroup.sample` records a sample on that instance.
 `moore.coverpoint` preserves automatic binning, signedness, and an optional
 SystemVerilog `iff` condition.
 
-The importer currently supports input sample arguments and integral coverpoint
-expressions involving those arguments and constants. Enum coverpoints, explicit
-bins, crosses, coverage options, constructor arguments, captured state, function
-calls in coverpoint expressions, sampling events,
-inheritance, and coverage methods other than `sample` are not yet supported.
-These operations preserve functional coverage in Moore IR; lowering to a
-simulation runtime, bin counters, and coverage reporting is not implemented.
+The importer supports integral coverpoint expressions involving input sample
+arguments, constants, and module variables captured when sampling. Scalar
+explicit `bins` and `illegal_bins` with integral constant value lists are
+represented by `moore.coverbin`. Their hit predicates include the coverpoint's
+`iff` condition. Explicit bins replace automatic binning; illegal hits lower to
+a runtime error, while ordinary hits update per-instance saturating counters.
+
+Bin arrays, ranges, transitions, wildcard bins, default bins, `ignore_bins`,
+bin-level conditions, and dynamic bin value sets are not yet supported. Enum
+automatic bins, crosses, function calls in coverpoint expressions, inheritance,
+and coverage methods other than `sample` also remain unsupported. Coverage
+reporting is not implemented.
 
 
 ## Types
