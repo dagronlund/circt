@@ -301,9 +301,10 @@ struct AssertionExprVisitor {
 };
 } // namespace
 
-FailureOr<Value> Context::convertSampledValueCallArity1(
-    const slang::ast::SystemSubroutine &subroutine, Location loc, Value value,
-    Type originalType, Value clockVal) {
+FailureOr<Value>
+Context::convertSampledValueCall(const slang::ast::SystemSubroutine &subroutine,
+                                 Location loc, Value value, Type originalType,
+                                 Value clockVal, int64_t delay) {
   using ksn = slang::parsing::KnownSystemName;
   auto nameId = subroutine.knownNameId;
 
@@ -359,7 +360,8 @@ FailureOr<Value> Context::convertSampledValueCallArity1(
   }
 
   case ksn::Past:
-    return castToMoore(ltl::PastOp::create(builder, loc, value, 1, clockVal));
+    return castToMoore(
+        ltl::PastOp::create(builder, loc, value, delay, clockVal));
 
   default:
     return Value{};
@@ -414,15 +416,31 @@ Value Context::convertSampledValueCallExpression(
   const auto &subroutine = *info.subroutine;
   auto args = expr.arguments();
 
-  FailureOr<Value> result;
+  int64_t delay = 1;
+  bool isPast = subroutine.knownNameId == slang::parsing::KnownSystemName::Past;
+  if (isPast && args.size() == 2 &&
+      args[1]->kind != slang::ast::ExpressionKind::EmptyArgument) {
+    auto ticks = evaluateConstant(*args[1]);
+    auto numTicks =
+        ticks.isInteger() ? ticks.integer().as<int64_t>() : std::nullopt;
+    if (!numTicks || *numTicks < 1) {
+      mlir::emitError(
+          loc, "expected positive constant integer tick count for `$past`");
+      return {};
+    }
+    delay = *numTicks;
+  }
+
+  FailureOr<Value> result = Value{};
   Value value;
   Value intVal;
   Type originalType;
   moore::IntType valTy;
 
-  switch (args.size()) {
-  case (1):
+  if (args.size() == 1 || (isPast && args.size() == 2)) {
     value = this->convertRvalueExpression(*args[0]);
+    if (!value)
+      return {};
     originalType = value.getType();
     valTy = dyn_cast<moore::IntType>(value.getType());
     if (!valTy) {
@@ -450,12 +468,8 @@ Value Context::convertSampledValueCallExpression(
     intVal = builder.createOrFold<moore::ToBuiltinIntOp>(loc, value);
     if (!intVal)
       return {};
-    result = this->convertSampledValueCallArity1(subroutine, loc, intVal,
-                                                 originalType, clockVal);
-    break;
-
-  default:
-    break;
+    result = this->convertSampledValueCall(subroutine, loc, intVal,
+                                           originalType, clockVal, delay);
   }
 
   if (failed(result))

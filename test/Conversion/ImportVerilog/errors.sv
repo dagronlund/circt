@@ -380,3 +380,11 @@ module InvalidOpenArrayAssign;
   // expected-error @below {{no implicit conversion from 'logic[7:0]$[3]' to 'string$[]'}}
   string strDynArr[] = bytes;
 endmodule
+
+// -----
+
+module PastGatingUnsupported(input logic clk, input logic d, input logic enable,
+                             output logic q);
+  // expected-error @below {{unsupported system call `$past`}}
+  always_ff @(posedge clk) q <= $past(d, 3, enable);
+endmodule
