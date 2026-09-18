@@ -111,17 +111,6 @@ endmodule
 
 // -----
 module top;
-  covergroup cg with function sample(bit [3:0] value);
-    coverpoint value {
-      // expected-error @below {{unsupported coverage bin value: expected an integral constant}}
-      bins values = {[0:3]};
-    }
-  endgroup
-  cg coverage = new;
-endmodule
-
-// -----
-module top;
   covergroup cg with function sample(bit a, bit b, bit enabled);
     cp_a: coverpoint a;
     cp_b: coverpoint b;
@@ -171,6 +160,17 @@ module top;
     coverpoint value {
       // expected-error @below {{unsupported coverage bin array range: expected known integral constant bounds}}
       bins values[] = {[2'bxx:2'b11]};
+    }
+  endgroup
+  cg coverage = new;
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(logic [1:0] value);
+    coverpoint value {
+      // expected-error @below {{unsupported coverage bin range: expected known integral constant bounds}}
+      bins values = {[2'bxx:2'b11]};
     }
   endgroup
   cg coverage = new;

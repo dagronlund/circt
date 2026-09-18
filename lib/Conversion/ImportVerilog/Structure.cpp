@@ -3003,7 +3003,66 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
           }
           return success();
         };
+        Value hit;
         for (const auto *expr : bin.getValues()) {
+          if (auto *range = expr->as_if<slang::ast::ValueRangeExpression>();
+              !bin.isArray && range) {
+            if (range->rangeKind != slang::ast::ValueRangeKind::Simple) {
+              mlir::emitError(binLoc) << "unsupported coverage bin range";
+              return {};
+            }
+            // Keep bounds in their original width: narrowing an out-of-range
+            // bound to the coverpoint type can turn an empty bin into a hit.
+            // An extra sign bit lets signed comparisons also represent the
+            // full range of unsigned coverpoints and bounds.
+            auto compareBound = [&](const slang::ast::Expression &bound,
+                                    bool lower) -> Value {
+              if (bound.type->isUnbounded())
+                return moore::ConstantOp::create(
+                    builder, binLoc, moore::IntType::getInt(getContext(), 1), 1,
+                    false);
+              auto constant =
+                  evaluateConstant(bound.unwrapImplicitConversions());
+              if (!constant.isInteger() || constant.integer().hasUnknown()) {
+                mlir::emitError(binLoc)
+                    << "unsupported coverage bin range: expected known "
+                       "integral constant bounds";
+                return {};
+              }
+              const auto &integer = constant.integer();
+              auto valueType = cast<moore::IntType>(value.getType());
+              unsigned width =
+                  std::max(valueType.getWidth(), integer.getBitWidth()) + 1;
+              auto compareType = moore::IntType::get(getContext(), width,
+                                                     valueType.getDomain());
+              auto extended = materializeConversion(
+                  compareType, value, point->getType().isSigned(), binLoc);
+              if (!extended)
+                return {};
+              APInt bits(integer.getBitWidth(),
+                         ArrayRef<uint64_t>(integer.getRawPtr(),
+                                            integer.getNumWords()));
+              bits = integer.isSigned() ? bits.sext(width) : bits.zext(width);
+              auto limit = moore::ConstantOp::create(builder, binLoc,
+                                                     compareType, FVInt(bits));
+              Value matches;
+              if (lower)
+                matches =
+                    moore::SgeOp::create(builder, binLoc, extended, limit);
+              else
+                matches =
+                    moore::SleOp::create(builder, binLoc, extended, limit);
+              return convertToBool(matches, Domain::TwoValued);
+            };
+            auto low = compareBound(range->left(), true);
+            auto high = compareBound(range->right(), false);
+            if (!low || !high)
+              return {};
+            Value matches = moore::AndOp::create(builder, binLoc, low, high);
+            hit = hit ? moore::OrOp::create(builder, binLoc, hit, matches)
+                      : matches;
+            continue;
+          }
           if (auto *range = expr->as_if<slang::ast::ValueRangeExpression>();
               bin.isArray && range) {
             auto low = evaluateConstant(range->left());
@@ -3047,7 +3106,6 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
               builder.getStringAttr(binName), hit,
               bin.binsKind == slang::ast::CoverageBinSymbol::IllegalBins);
         };
-        Value hit;
         for (auto [index, constant] : llvm::enumerate(values)) {
           auto binValue = materializeConstant(slang::ConstantValue(constant),
                                               point->getType(), binLoc);
