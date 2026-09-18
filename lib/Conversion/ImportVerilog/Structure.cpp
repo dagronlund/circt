@@ -15,6 +15,7 @@
 #include "slang/syntax/SyntaxVisitor.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/ScopeExit.h"
+#include <unordered_set>
 
 using namespace circt;
 using namespace ImportVerilog;
@@ -2979,17 +2980,54 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     if (!bins.empty()) {
       for (const auto &bin : bins) {
         auto binLoc = convertLocation(bin.location);
-        if (bin.isArray || bin.isWildcard || bin.isDefault ||
+        if (bin.getNumberOfBinsExpr() || bin.isWildcard || bin.isDefault ||
             bin.isDefaultSequence || bin.getIffExpr() || bin.getWithExpr() ||
             bin.getSetCoverageExpr() || !bin.getTransList().empty() ||
             bin.binsKind == slang::ast::CoverageBinSymbol::IgnoreBins) {
           mlir::emitError(binLoc)
-              << "unsupported coverage bin: expected a scalar "
+              << "unsupported coverage bin: expected a scalar or unsized array "
                  "value bin or illegal bin";
           return {};
         }
-        Value hit;
+        // An unsized array has one bin for each distinct value in its set.
+        // Collect before emitting IR so very large ranges fail cheaply.
+        SmallVector<slang::SVInt> values;
+        std::unordered_set<slang::SVInt> seen;
+        auto addValue = [&](const slang::SVInt &value) {
+          if (!bin.isArray || seen.insert(value).second)
+            values.push_back(value);
+          if (bin.isArray && values.size() > 65536) {
+            mlir::emitError(binLoc)
+                << "unsupported coverage bin array with more than 65536 bins";
+            return failure();
+          }
+          return success();
+        };
         for (const auto *expr : bin.getValues()) {
+          if (auto *range = expr->as_if<slang::ast::ValueRangeExpression>();
+              bin.isArray && range) {
+            auto low = evaluateConstant(range->left());
+            auto high = evaluateConstant(range->right());
+            if (range->rangeKind != slang::ast::ValueRangeKind::Simple ||
+                !low || !high || !low.isInteger() || !high.isInteger() ||
+                low.integer().hasUnknown() || high.integer().hasUnknown()) {
+              mlir::emitError(binLoc)
+                  << "unsupported coverage bin array range: expected "
+                     "known integral constant bounds";
+              return {};
+            }
+            auto current = low.integer();
+            const auto &last = high.integer();
+            while (current <= last) {
+              if (failed(addValue(current)))
+                return {};
+              // Do not increment the maximum representable value and wrap.
+              if (current == last)
+                break;
+              ++current;
+            }
+            continue;
+          }
           auto constant = evaluateConstant(*expr);
           if (!constant || !constant.isInteger()) {
             mlir::emitError(binLoc)
@@ -2997,29 +3035,44 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
                    "an integral constant";
             return {};
           }
-          auto binValue = materializeConstant(constant, *expr->type, binLoc);
+          if (failed(addValue(constant.integer())))
+            return {};
+        }
+        auto emitBin = [&](Value hit, StringRef binName) {
+          hit = moore::AndOp::create(builder, binLoc, hit, enable);
+          if (bin.binsKind != slang::ast::CoverageBinSymbol::IllegalBins)
+            info.hits.push_back(hit);
+          moore::CoverBinOp::create(
+              builder, binLoc, builder.getStringAttr(name),
+              builder.getStringAttr(binName), hit,
+              bin.binsKind == slang::ast::CoverageBinSymbol::IllegalBins);
+        };
+        Value hit;
+        for (auto [index, constant] : llvm::enumerate(values)) {
+          auto binValue = materializeConstant(slang::ConstantValue(constant),
+                                              point->getType(), binLoc);
           if (!binValue)
             return {};
           binValue = materializeConversion(value.getType(), binValue,
-                                           expr->type->isSigned(), binLoc);
+                                           point->getType().isSigned(), binLoc);
           if (!binValue)
             return {};
           Value matches =
               moore::CaseEqOp::create(builder, binLoc, value, binValue);
-          hit = hit ? moore::OrOp::create(builder, binLoc, hit, matches)
-                    : matches;
+          if (bin.isArray)
+            emitBin(matches,
+                    (Twine(bin.name) + "[" + Twine(index) + "]").str());
+          else
+            hit = hit ? moore::OrOp::create(builder, binLoc, hit, matches)
+                      : matches;
         }
+        if (bin.isArray)
+          continue;
         if (!hit) {
           mlir::emitError(binLoc) << "unsupported empty coverage bin";
           return {};
         }
-        hit = moore::AndOp::create(builder, binLoc, hit, enable);
-        if (bin.binsKind != slang::ast::CoverageBinSymbol::IllegalBins)
-          info.hits.push_back(hit);
-        moore::CoverBinOp::create(
-            builder, binLoc, builder.getStringAttr(name),
-            builder.getStringAttr(bin.name), hit,
-            bin.binsKind == slang::ast::CoverageBinSymbol::IllegalBins);
+        emitBin(hit, bin.name);
       }
       continue;
     }
