@@ -2893,13 +2893,16 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     valueSymbols.insert(&arg, var);
   }
 
+  // Retain each point's bin predicates for automatic cross products. Build
+  // crosses after all points, including implicitly declared cross targets.
+  struct PointBins {
+    Value value, enable;
+    bool isSigned;
+    SmallVector<Value> hits;
+  };
+  DenseMap<const slang::ast::CoverpointSymbol *, PointBins> pointBins;
   unsigned pointIndex = 0;
   for (const auto &member : body.members()) {
-    if (member.kind == slang::ast::SymbolKind::CoverCross) {
-      mlir::emitError(convertLocation(member.location))
-          << "unsupported covergroup cross";
-      return {};
-    }
     auto *point = member.as_if<slang::ast::CoverpointSymbol>();
     if (!point)
       continue; // Built-in methods and option structures.
@@ -2970,6 +2973,8 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     auto name = point->name.empty() ? ("$coverpoint" + Twine(pointIndex)).str()
                                     : std::string(point->name);
     ++pointIndex;
+    auto &info = pointBins[point];
+    info = {value, enable, point->getType().isSigned(), {}};
     auto bins = point->membersOfType<slang::ast::CoverageBinSymbol>();
     if (!bins.empty()) {
       for (const auto &bin : bins) {
@@ -3009,6 +3014,8 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
           return {};
         }
         hit = moore::AndOp::create(builder, binLoc, hit, enable);
+        if (bin.binsKind != slang::ast::CoverageBinSymbol::IllegalBins)
+          info.hits.push_back(hit);
         moore::CoverBinOp::create(
             builder, binLoc, builder.getStringAttr(name),
             builder.getStringAttr(bin.name), hit,
@@ -3018,6 +3025,75 @@ Context::declareCovergroup(const slang::ast::CovergroupType &group) {
     }
     moore::CoverpointOp::create(builder, pointLoc, builder.getStringAttr(name),
                                 value, enable, point->getType().isSigned());
+  }
+  unsigned crossIndex = 0;
+  for (const auto &cross : body.membersOfType<slang::ast::CoverCrossSymbol>()) {
+    auto crossLoc = convertLocation(cross.location);
+    bool hasBins = llvm::any_of(
+        cross.membersOfType<slang::ast::CoverCrossBodySymbol>(),
+        [](const auto &body) {
+          return !body.template membersOfType<slang::ast::CoverageBinSymbol>()
+                      .empty();
+        });
+    if (!cross.options.empty() || hasBins || cross.getIffExpr()) {
+      mlir::emitError(crossLoc)
+          << "unsupported covergroup cross options, explicit bins, or iff";
+      return {};
+    }
+    auto name = cross.name.empty() ? ("$cross" + Twine(crossIndex)).str()
+                                   : std::string(cross.name);
+    ++crossIndex;
+    SmallVector<Value> products;
+    products.push_back(moore::ConstantOp::create(
+        builder, crossLoc, moore::IntType::getInt(getContext(), 1), 1, false));
+    for (const auto *target : cross.targets) {
+      auto &info = pointBins.at(target);
+      if (target->membersOfType<slang::ast::CoverageBinSymbol>().empty() &&
+          info.hits.empty()) {
+        // Match the default automatic bins used by MooreToCore: the high
+        // min(width, 6) bits select equal-sized intervals. Check the full value
+        // for unknowns before extracting, since even a low X/Z excludes a hit.
+        Value index = info.value;
+        auto type = cast<moore::IntType>(index.getType());
+        unsigned width = type.getWidth();
+        unsigned binWidth = std::min(width, 6u);
+        auto indexType =
+            moore::IntType::get(getContext(), binWidth, type.getDomain());
+        Value known = moore::EqOp::create(builder, crossLoc, index, index);
+        known = convertToBool(known, Domain::TwoValued);
+        Value enabled =
+            moore::AndOp::create(builder, crossLoc, info.enable, known);
+        if (width > binWidth)
+          index = moore::ExtractOp::create(builder, crossLoc, indexType, index,
+                                           width - binWidth);
+        for (unsigned i = 0; i < (1u << binWidth); ++i) {
+          unsigned value = info.isSigned ? i ^ (1u << (binWidth - 1)) : i;
+          auto constant = moore::ConstantOp::create(builder, crossLoc,
+                                                    indexType, value, false);
+          auto hit =
+              moore::CaseEqOp::create(builder, crossLoc, index, constant);
+          info.hits.push_back(
+              moore::AndOp::create(builder, crossLoc, hit, enabled));
+        }
+      }
+      // Materializing a cross is exponential in the number of targets. Bound
+      // the expansion instead of exhausting memory on large declarations.
+      if (!info.hits.empty() && products.size() > 65536 / info.hits.size()) {
+        mlir::emitError(crossLoc)
+            << "unsupported covergroup cross with more than 65536 bins";
+        return {};
+      }
+      SmallVector<Value> next;
+      for (auto product : products)
+        for (auto hit : info.hits)
+          next.push_back(moore::AndOp::create(builder, crossLoc, product, hit));
+      products = std::move(next);
+    }
+    for (auto [index, hit] : llvm::enumerate(products))
+      moore::CoverBinOp::create(
+          builder, crossLoc, builder.getStringAttr(name),
+          builder.getStringAttr(("auto[" + Twine(index) + "]").str()), hit,
+          false);
   }
   covergroups[&group] = decl;
   return decl;

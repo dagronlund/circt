@@ -25,8 +25,8 @@ module top;
   covergroup cg with function sample(int value);
     a: coverpoint value;
     b: coverpoint value;
-    // expected-error @below {{unsupported covergroup cross}}
-    cross a, b;
+    // expected-error @below {{unsupported covergroup cross options, explicit bins, or iff}}
+    cross a, b { bins selected = binsof(a); }
   endgroup
   cg coverage = new();
 endmodule
@@ -116,6 +116,40 @@ module top;
       // expected-error @below {{unsupported coverage bin value: expected an integral constant}}
       bins values = {[0:3]};
     }
+  endgroup
+  cg coverage = new;
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(bit a, bit b, bit enabled);
+    cp_a: coverpoint a;
+    cp_b: coverpoint b;
+    // expected-error @below {{unsupported covergroup cross options, explicit bins, or iff}}
+    cross cp_a, cp_b iff (enabled);
+  endgroup
+  cg coverage = new;
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(bit a, bit b);
+    cp_a: coverpoint a;
+    cp_b: coverpoint b;
+    // expected-error @below {{unsupported covergroup cross options, explicit bins, or iff}}
+    cross cp_a, cp_b { option.at_least = 2; }
+  endgroup
+  cg coverage = new;
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(int a, int b, int c);
+    cp_a: coverpoint a;
+    cp_b: coverpoint b;
+    cp_c: coverpoint c;
+    // expected-error @below {{unsupported covergroup cross with more than 65536 bins}}
+    cross cp_a, cp_b, cp_c;
   endgroup
   cg coverage = new;
 endmodule

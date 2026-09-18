@@ -32,11 +32,19 @@ represented by `moore.coverbin`. Their hit predicates include the coverpoint's
 `iff` condition. Explicit bins replace automatic binning; illegal hits lower to
 a runtime error, while ordinary hits update per-instance saturating counters.
 
+Automatic crosses of integral coverpoints are represented by `moore.coverbin`
+predicates for the Cartesian product of the target bins. Targets may use default
+automatic bins or supported scalar explicit bins. Coverpoint `iff` conditions
+are preserved, and illegal bins do not participate in the cross. Implicit
+coverpoints and unnamed crosses are supported. Cross expansion is limited to
+65,536 bins per cross.
+
 Bin arrays, ranges, transitions, wildcard bins, default bins, `ignore_bins`,
 bin-level conditions, and dynamic bin value sets are not yet supported. Enum
-automatic bins, crosses, function calls in coverpoint expressions, inheritance,
-and coverage methods other than `sample` also remain unsupported. Coverage
-reporting is not implemented.
+automatic bins, explicit cross bins, cross options and cross-level `iff`,
+function calls in coverpoint expressions, inheritance, and coverage methods
+other than `sample` also remain unsupported. Coverage reporting is not
+implemented.
 
 
 ## Types
