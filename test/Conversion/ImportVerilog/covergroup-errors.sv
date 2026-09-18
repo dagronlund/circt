@@ -113,8 +113,8 @@ endmodule
 module top;
   covergroup cg with function sample(bit value);
     coverpoint value {
-      // expected-error @below {{unsupported coverage bin: expected a scalar value bin or illegal bin}}
-      bins values[] = {0, 1};
+      // expected-error @below {{unsupported coverage bin: expected a scalar or unsized array value bin or illegal bin}}
+      bins values[2] = {0, 1};
     }
   endgroup
   cg coverage = new;
@@ -161,6 +161,28 @@ module top;
     cp_c: coverpoint c;
     // expected-error @below {{unsupported covergroup cross with more than 65536 bins}}
     cross cp_a, cp_b, cp_c;
+  endgroup
+  cg coverage = new;
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(int value);
+    coverpoint value {
+      // expected-error @below {{unsupported coverage bin array with more than 65536 bins}}
+      bins values[] = {[0:65536]};
+    }
+  endgroup
+  cg coverage = new;
+endmodule
+
+// -----
+module top;
+  covergroup cg with function sample(logic [1:0] value);
+    coverpoint value {
+      // expected-error @below {{unsupported coverage bin array range: expected known integral constant bounds}}
+      bins values[] = {[2'bxx:2'b11]};
+    }
   endgroup
   cg coverage = new;
 endmodule
