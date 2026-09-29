@@ -217,6 +217,11 @@ struct PackageVisitor : public BaseVisitor {
   using BaseVisitor::BaseVisitor;
   using BaseVisitor::visit;
 
+  // Ignore sequence and property declarations. Slang expands them into
+  // AssertionInstance expressions, which are lowered at their use sites.
+  LogicalResult visit(const slang::ast::SequenceSymbol &) { return success(); }
+  LogicalResult visit(const slang::ast::PropertySymbol &) { return success(); }
+
   // Handle functions and tasks.
   LogicalResult visit(const slang::ast::SubroutineSymbol &subroutine) {
     if (!context.declareFunction(subroutine))
