@@ -369,6 +369,19 @@ LogicalResult preflight(ModuleOp module, bool normalized = false) {
       return WalkResult::interrupt();
     }
     if (auto drive = dyn_cast<DriveOp>(op)) {
+      // Diagnose explicit aggregate state before process recognition. The
+      // ordinary frontend pipeline may already have moved the drive outside
+      // its process, and aggregate presets are not supported by extraction.
+      if (auto signal = drive.getSignal().getDefiningOp<SignalOp>();
+          signal && signal->hasAttr("llhd.explicit_init") &&
+          !signal->hasAttr("llhd.unconstrained") &&
+          isa<hw::ArrayType, hw::StructType, hw::UnionType>(
+              signal.getInit().getType()) &&
+          (drive->getParentOfType<ProcessOp>() ||
+           drive.getValue().getDefiningOp<ProcessOp>())) {
+        signal.emitError("aggregate register initialization is unsupported");
+        return WalkResult::interrupt();
+      }
       TimeAttr time;
       if (!matchPattern(drive.getTime(), m_Constant(&time)) ||
           time.getTime() != 0 || time.getDelta() > 1 || time.getEpsilon() > 1) {

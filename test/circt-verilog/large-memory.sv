@@ -6,7 +6,7 @@
 // CHECK-LABEL: hw.module @top(
 // CHECK: [[INIT:%.+]] = hw.aggregate_constant [0 : i32,
 // CHECK-SAME: : !hw.array<524288xi32>
-// CHECK: [[MEM:%.+]] = llhd.sig [[INIT]] : !hw.array<524288xi32>
+// CHECK: [[MEM:%.+]] = llhd.sig [[INIT]] {llhd.unconstrained} : !hw.array<524288xi32>
 // CHECK: [[READ:%.+]] = llhd.prb [[MEM]] : !hw.array<524288xi32>
 // CHECK: [[RESULT:%.+]] = hw.array_get [[READ]][{{%.+}}] : !hw.array<524288xi32>, i19
 // CHECK: hw.output [[RESULT]] : i32
