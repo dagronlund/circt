@@ -148,9 +148,86 @@ def procedural(text):
       assert circuit.state['%qs'] == q and circuit.state['%rs'] == r
 
 
+def temporal(text):
+  hit = set()
+  allowed = failing = 0
+  for trace in itertools.product(range(8), repeat=4):
+    circuit = Circuit(text)
+    previous_a = two_a = False
+    for bits in trace:
+      a, b, en = bits & 1, (bits >> 1) & 1, bits >> 2
+      got = circuit.sample({'%clk': 1, '%a': a, '%b': b, '%en': en})
+      next_fail = bool(en and previous_a and not b)
+      expected = {
+          'next': next_fail,
+          'next_assume': next_fail,
+          'next_cover': bool(en and previous_a and b),
+          'sequence': bool(en and previous_a and b),
+          'sequence_assert': bool(en and (not a or (previous_a and not b))),
+          'sequence_assume': bool(en and (not a or (previous_a and not b))),
+          'repeat': bool(en and two_a and b),
+          'same': bool(en and a and not b)
+      }
+      assert got == expected, (trace, got, expected)
+      hit.update(label for label, value in got.items() if value)
+      allowed += not got['next_assume']
+      failing += got['next']
+      two_a, previous_a = bool(en and previous_a and a), bool(en and a)
+  assert allowed and failing and {'next_cover', 'sequence', 'repeat'} <= hit
+  # Disable after an attempt starts, then re-enable before the following edge.
+  circuit = Circuit(text)
+  circuit.sample({'%clk': 1, '%a': 1, '%b': 0, '%en': 1})
+  circuit.reset({'%clk': 0, '%a': 0, '%b': 0, '%en': 0})
+  got = circuit.sample({'%clk': 1, '%a': 0, '%b': 0, '%en': 1})
+  assert not got['next'] and not got['sequence']
+  # A pending obligation at the last sample is not a premature failure.
+  circuit = Circuit(text)
+  assert not circuit.sample({'%clk': 1, '%a': 1, '%b': 0, '%en': 1})['next']
+
+
+def history(text):
+  for bits in itertools.product(range(2), repeat=2):
+    initial = {'%1': bits[0], '%2': bits[1]}
+    for trace in itertools.product(range(2), repeat=4):
+      circuit = Circuit(text, initial)
+      past = [bits[1], bits[0]]
+      for a in trace:
+        got = circuit.sample({'%clk': 1, '%a': a})
+        assert got['past'] == bool(past.pop(0))
+        past.append(a)
+
+
+def mutations(text):
+  # Mutate the actual lowered circuit, not the reference evaluator. Inverting
+  # the same-cycle assertion creates a failure on a trace satisfying the source.
+  original = Circuit(text)
+  mutant = text.replace(
+      'verif.clocked_assert %b', '%mutation_one = hw.constant true\n'
+      '    %mutation = comb.xor %b, %mutation_one : i1\n'
+      '    verif.clocked_assert %mutation', 1)
+  inputs = {'%clk': 1, '%a': 1, '%b': 1, '%en': 1}
+  original.sample(inputs)
+  broken = Circuit(mutant)
+  broken.sample(inputs)
+  assert not original.sample(inputs)['next'] and broken.sample(inputs)['next']
+  # Replacing the completed-match event with false removes a reachable witness.
+  mutant = re.sub(r'(verif.clocked_cover )' + SSA + r'(.*label "repeat")',
+                  r'%never = hw.constant false\n    \1%never\2', text)
+  original, broken = Circuit(text), Circuit(mutant)
+  original.sample(inputs)
+  broken.sample(inputs)
+  original.sample(inputs)
+  broken.sample(inputs)
+  assert original.sample(
+      inputs)['repeat'] and not broken.sample(inputs)['repeat']
+
+
 text = sys.stdin.read()
 combinational(extract(text, 'combinational'))
 procedural(extract(text, 'procedural'))
+temporal(extract(text, 'temporal'))
+history(extract(text, 'history'))
+mutations(extract(text, 'temporal'))
 wrapper = Circuit(extract(text, 'wrapper'))
 assert wrapper.sample({'%clk': 0, '%a': 0}, 'neg')['wrapped']
 assert not wrapper.sample({'%clk': 0, '%a': 1}, 'neg')['wrapped']
@@ -170,4 +247,6 @@ for trace in itertools.product(range(2), repeat=4):
     assert observed == {'raw_before': not q, 'raw_after': not q}
     q = d
 
-print('Exhaustive combinational and sequential traces passed')
+print(
+    'Exhaustive combinational, procedural, temporal, history and mutation traces passed'
+)

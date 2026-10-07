@@ -71,3 +71,23 @@ implicit scheduling zeros and initial wait placeholders do not constrain state.
 Explicit constant initialization survives the ordinary frontend pipeline.
 Nonconstant formal register initialization is rejected. Legacy IR without
 provenance cannot recover source initialization that was already discarded.
+
+The temporal subset supports Boolean expressions and implication, explicit
+clock scopes/atoms, fixed delays, finite concatenation, fixed consecutive
+repetition, and sampled history. Concatenation overlaps endpoints; next-cycle
+implication uses `concat(a, delay(true, 1, 0))`. Pipelines track every overlapping
+attempt. Assert/assume monitors check each required sample; covers report completed
+non-vacuous matches. Pending bits start false, while sampled history remains
+unconstrained initially. `max-monitor-depth` defaults to 256; overflow and
+unsupported, variable, or unbounded temporal forms fail.
+
+For temporal checks, the existing enable denotes `disable iff`; its negation
+asynchronously clears active attempts, including pulses between sampling edges.
+This differs from procedural reachability. Guarded temporal CFG checks requiring
+separate start/disable predicates are rejected. Pending attempts at a bounded
+trace's end remain state rather than automatically becoming failures.
+
+The result is hardware, not a proof or a checking problem. Backends must support
+the remaining clocks, initialization, asynchronous reset, and cover operations.
+The unchanged CIRCT BMC register externalizer rejects asynchronous reset;
+backend compatibility is checked independently of formal IR legality.

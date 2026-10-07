@@ -11,6 +11,7 @@
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
+#include "circt/Dialect/LTL/LTLOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -32,6 +33,275 @@ using namespace circt;
 using namespace circt::llhd;
 
 namespace {
+/// A fixed sequence is a list of predicates indexed by sample number. Empty
+/// cycles are true. Concatenation overlaps endpoints; repetition advances one
+/// sample between consecutive copies. All lengths are checked before expansion.
+using Timeline = SmallVector<Value>;
+
+struct MonitorBuilder {
+  MonitorBuilder(Operation *check, unsigned limit)
+      : check(check), builder(check), loc(check->getLoc()), limit(limit) {
+    if (isClockedFormalCheck(check)) {
+      clock = check->getOperand(1);
+      edge = cast<verif::ClockEdgeAttr>(check->getAttr("edge")).getValue();
+      if (check->getNumOperands() == 3)
+        enable = check->getOperand(2);
+    }
+  }
+
+  Operation *check;
+  OpBuilder builder;
+  Location loc;
+  unsigned limit;
+  Value clock, enable, seqClock, disable;
+  DenseSet<Value> sequencesInProgress, booleansInProgress;
+  verif::ClockEdge edge = verif::ClockEdge::Pos;
+
+  Value konst(bool value) {
+    return hw::ConstantOp::create(builder, loc, builder.getI1Type(), value);
+  }
+  Value andWith(Value a, Value b) {
+    return builder.createOrFold<comb::AndOp>(loc, a, b);
+  }
+  Value notOf(Value a) { return comb::createOrFoldNot(builder, loc, a); }
+  Value orWith(Value a, Value b) {
+    return builder.createOrFold<comb::OrOp>(loc, a, b);
+  }
+  LogicalResult error(Value value, StringRef message) {
+    if (auto *op = value.getDefiningOp())
+      op->emitError(message);
+    else
+      check->emitError(message);
+    return failure();
+  }
+  bool withinLimit(uint64_t length) {
+    if (length <= limit)
+      return true;
+    check->emitError("temporal monitor exceeds max-monitor-depth");
+    return false;
+  }
+  Value reg(Value input) {
+    if (!seqClock) {
+      seqClock = builder.createOrFold<seq::ToClockOp>(loc, clock);
+      if (edge == verif::ClockEdge::Neg)
+        seqClock = seq::ClockInverterOp::create(builder, loc, seqClock);
+    }
+    if (enable && !disable)
+      disable = notOf(enable);
+    // Asynchronous reset cancels every in-flight attempt, including a disable
+    // pulse entirely between sampling edges. This is not a clock enable.
+    return seq::FirRegOp::create(
+        builder, loc, input, seqClock, builder.getStringAttr(""),
+        hw::InnerSymAttr{}, builder.getIntegerAttr(builder.getI1Type(), 0),
+        disable, disable ? konst(false) : Value{}, bool(disable));
+  }
+
+  LogicalResult sequence(Value value, Timeline &result) {
+    if (value.getType().isSignlessInteger(1)) {
+      result.push_back(value);
+      return success();
+    }
+    if (!sequencesInProgress.insert(value).second)
+      return error(value, "cyclic temporal expression is unsupported");
+    auto done = llvm::scope_exit([&] { sequencesInProgress.erase(value); });
+    if (auto op = value.getDefiningOp<ltl::DelayOp>()) {
+      if (!op.getLength() || *op.getLength() != 0)
+        return error(value,
+                     "only fixed temporal delays are supported; unbounded "
+                     "or variable temporal sequence is unsupported");
+      Timeline input;
+      if (failed(sequence(op.getInput(), input)))
+        return failure();
+      auto delay = op.getDelay();
+      if (delay > limit || input.size() > limit - delay) {
+        check->emitError("temporal monitor exceeds max-monitor-depth");
+        return failure();
+      }
+      result.append(delay, konst(true));
+      result.append(input);
+      return success();
+    }
+    if (auto op = value.getDefiningOp<ltl::ConcatOp>()) {
+      for (auto input : op.getInputs()) {
+        Timeline next;
+        if (failed(sequence(input, next)))
+          return failure();
+        if (result.empty()) {
+          result = std::move(next);
+          continue;
+        }
+        if (next.empty())
+          continue;
+        if (!withinLimit(result.size() + next.size() - 1))
+          return failure();
+        result.back() = andWith(result.back(), next.front());
+        result.append(next.begin() + 1, next.end());
+      }
+      return success();
+    }
+    if (auto op = value.getDefiningOp<ltl::RepeatOp>()) {
+      if (!op.getMore() || *op.getMore() != 0)
+        return error(value,
+                     "only fixed finite consecutive repetition is supported");
+      Timeline input;
+      if (failed(sequence(op.getInput(), input)))
+        return failure();
+      auto count = op.getBase();
+      if (count < 0 ||
+          (input.size() && uint64_t(count) > limit / input.size())) {
+        check->emitError("temporal monitor exceeds max-monitor-depth");
+        return failure();
+      }
+      for (uint64_t i = 0; i < count; ++i)
+        result.append(input);
+      return success();
+    }
+    if (auto op = value.getDefiningOp<ltl::ClockOp>()) {
+      if (op.getClock() != clock || unsigned(op.getEdge()) != unsigned(edge))
+        return error(value, "property observes multiple unrelated clocks");
+      return sequence(op.getInput(), result);
+    }
+    if (auto op = value.getDefiningOp<ltl::ClockedAtomOp>()) {
+      if (op.getClock() != clock || unsigned(op.getEdge()) != unsigned(edge))
+        return error(value, "property observes multiple unrelated clocks");
+      result.push_back(op.getInput());
+      return success();
+    }
+    // Boolean LTL expressions are handled without a monitor.
+    auto boolean = booleanExpr(value);
+    if (!boolean)
+      return failure();
+    result.push_back(boolean);
+    return success();
+  }
+
+  Value booleanExpr(Value value) {
+    if (value.getType().isSignlessInteger(1))
+      return value;
+    if (!booleansInProgress.insert(value).second) {
+      (void)error(value, "cyclic temporal expression is unsupported");
+      return {};
+    }
+    auto done = llvm::scope_exit([&] { booleansInProgress.erase(value); });
+    if (auto op = value.getDefiningOp<ltl::BooleanConstantOp>())
+      return konst(op.getValue());
+    if (auto op = value.getDefiningOp<ltl::NotOp>()) {
+      auto input = booleanExpr(op.getInput());
+      return input ? notOf(input) : Value{};
+    }
+    auto *op = value.getDefiningOp();
+    if (op && isa<ltl::AndOp, ltl::OrOp, ltl::IntersectOp>(op)) {
+      bool isOr = isa<ltl::OrOp>(op);
+      Value result = konst(!isOr);
+      for (auto operand : op->getOperands()) {
+        auto next = booleanExpr(operand);
+        if (!next)
+          return {};
+        result = isOr ? orWith(result, next) : andWith(result, next);
+      }
+      return result;
+    }
+    if (auto op = value.getDefiningOp<ltl::ImplicationOp>()) {
+      auto a = booleanExpr(op.getAntecedent());
+      auto b = booleanExpr(op.getConsequent());
+      return a && b ? orWith(notOf(a), b) : Value{};
+    }
+    (void)error(value, "unsupported temporal operator in Boolean property");
+    return {};
+  }
+
+  /// A pipeline tracks all overlapping attempts, one bit per sample position.
+  /// No attempt exists before startup. The enable starts attempts and async
+  /// cancellation clears intermediate stages.
+  Value match(ArrayRef<Value> timeline, Value start) {
+    Value active = start;
+    for (auto [i, predicate] : llvm::enumerate(timeline)) {
+      active = andWith(active, predicate);
+      if (i + 1 != timeline.size())
+        active = reg(active);
+    }
+    return active;
+  }
+  void emit(Value property, Value guard) {
+    OperationState state(loc, check->getName());
+    state.addOperands(property);
+    if (clock)
+      state.addOperands(clock);
+    if (guard)
+      state.addOperands(guard);
+    state.addAttributes(check->getAttrs());
+    builder.create(state);
+  }
+
+  LogicalResult lower() {
+    Value property = check->getOperand(0);
+    if (property.getType().isSignlessInteger(1))
+      return success();
+    // Explicit clocks can turn an unclocked property into a clocked check.
+    if (!clock) {
+      if (auto op = property.getDefiningOp<ltl::ClockOp>()) {
+        clock = op.getClock();
+        edge = verif::ClockEdge(unsigned(op.getEdge()));
+        property = op.getInput();
+      } else if (auto op = property.getDefiningOp<ltl::ClockedAtomOp>()) {
+        clock = op.getClock();
+        edge = verif::ClockEdge(unsigned(op.getEdge()));
+        property = op.getInput();
+      }
+      if (clock) {
+        OperationState state(
+            loc, "verif.clocked_" +
+                     check->getName().getStringRef().drop_front(6).str());
+        state.addOperands({property, clock});
+        if (check->getNumOperands() == 2) {
+          enable = check->getOperand(1);
+          state.addOperands(enable);
+        }
+        state.addAttributes(check->getAttrs());
+        state.addAttribute(
+            "edge", verif::ClockEdgeAttr::get(builder.getContext(), edge));
+        auto *replacement = builder.create(state);
+        check->erase();
+        check = replacement;
+        builder.setInsertionPoint(check);
+      }
+    }
+    if (edge == verif::ClockEdge::Both)
+      return check->emitError("both-edge properties are unsupported");
+    bool cover = isa<verif::CoverOp, verif::ClockedCoverOp>(check);
+    auto implication = property.getDefiningOp<ltl::ImplicationOp>();
+    Timeline antecedent, consequent;
+    if (implication) {
+      if (failed(sequence(implication.getAntecedent(), antecedent)) ||
+          failed(sequence(implication.getConsequent(), consequent)))
+        return failure();
+    } else if (failed(sequence(property, consequent))) {
+      return failure();
+    }
+    if (!clock && (antecedent.size() > 1 || consequent.size() > 1))
+      return check->emitError("temporal property has no sampling clock");
+    Value start = enable ? enable : konst(true);
+    if (implication)
+      start = match(antecedent, start);
+    if (cover) {
+      // Cover witnesses are completed non-vacuous matches, never disabled or
+      // merely pending attempts. In particular !antecedent is not a cover hit.
+      emit(match(consequent, start), enable);
+    } else {
+      // Each attempted sequence requires each Boolean sample. Outstanding
+      // obligations remain in registers when a finite checking bound ends.
+      Value pending = start;
+      for (auto [i, predicate] : llvm::enumerate(consequent)) {
+        emit(predicate, pending);
+        if (i + 1 != consequent.size())
+          pending = reg(andWith(pending, predicate));
+      }
+    }
+    check->erase();
+    return success();
+  }
+};
+
 /// Recognize only the frontend's property-only trampoline/self-loop wrapper.
 /// Its loop describes a concurrent property, not repeated procedural execution.
 LogicalResult unwrapPropertyProcess(ProcessOp process) {
@@ -286,17 +556,9 @@ struct LowerLLHDFormalToCorePass
   }
 
   LogicalResult lower(ModuleOp module) {
+    if (!maxMonitorDepth)
+      return module.emitError("max-monitor-depth must be positive");
     if (failed(preflight(module)))
-      return failure();
-    auto temporal = module.walk([&](Operation *op) -> WalkResult {
-      if (isFormalCheck(op) &&
-          !op->getOperand(0).getType().isSignlessInteger(1)) {
-        op->emitError("temporal verification is not yet supported");
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    if (temporal.wasInterrupted())
       return failure();
     PassManager storage(&getContext());
     storage.addNestedPass<hw::HWModuleOp>(createMem2RegPass());
@@ -350,6 +612,30 @@ struct LowerLLHDFormalToCorePass
     signals.addNestedPass<hw::HWModuleOp>(createSig2Reg());
     if (failed(runPipeline(signals, module)))
       return failure();
+    // Past has its own sampling clock and intentionally no invented initial
+    // value. Pending obligations, in contrast, are initialized to false.
+    SmallVector<ltl::PastOp> pastOps;
+    module.walk([&](ltl::PastOp op) { pastOps.push_back(op); });
+    for (auto op : pastOps) {
+      if (op.getDelay() > maxMonitorDepth)
+        return op.emitError("sampled history exceeds max-monitor-depth");
+      OpBuilder builder(op);
+      Value clock =
+          builder.createOrFold<seq::ToClockOp>(op.getLoc(), op.getClk());
+      Value value = op.getInput();
+      for (unsigned i = 0; i < op.getDelay(); ++i)
+        value = seq::CompRegOp::create(builder, op.getLoc(), value, clock);
+      op.replaceAllUsesWith(value);
+      op.erase();
+    }
+    SmallVector<Operation *> checks;
+    module.walk([&](Operation *op) {
+      if (isFormalCheck(op))
+        checks.push_back(op);
+    });
+    for (auto *check : checks)
+      if (failed(MonitorBuilder(check, maxMonitorDepth).lower()))
+        return failure();
     if (failed(cleanup(module)))
       return failure();
     // Region simplification may materialize integer constants with Arith.

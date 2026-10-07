@@ -66,6 +66,33 @@ hw.module @procedural(in %clk: i1, in %en: i1, in %d: i1, out q: i1, out r: i1) 
   hw.output %q, %r : i1, i1
 }
 
+// CHECK-LABEL: @temporal(
+// CHECK: seq.firreg {{.*}} reset async {{.*}} preset 0 : i1
+// CHECK: verif.clocked_assert %b if {{.*}}, posedge %clk label "next"
+// CHECK: verif.clocked_assume %b if {{.*}}, posedge %clk label "next_assume"
+// CHECK: verif.clocked_cover {{.*}}, posedge %clk label "next_cover"
+// CHECK: verif.clocked_cover {{.*}}, posedge %clk label "sequence"
+// CHECK: verif.clocked_cover {{.*}}, posedge %clk label "repeat"
+hw.module @temporal(in %clk: i1, in %a: i1, in %b: i1, in %en: i1) {
+  %true = hw.constant true
+  %tick = ltl.delay %true, 1, 0 : i1
+  %antecedent = ltl.concat %a, %tick : i1, !ltl.sequence
+  %next = ltl.implication %antecedent, %b : !ltl.sequence, i1
+  verif.clocked_assert %next if %en, posedge %clk label "next" : !ltl.property
+  verif.clocked_assume %next if %en, posedge %clk label "next_assume" : !ltl.property
+  verif.clocked_cover %next if %en, posedge %clk label "next_cover" : !ltl.property
+  %later = ltl.delay %b, 1, 0 : i1
+  %sequence = ltl.concat %a, %later : i1, !ltl.sequence
+  verif.clocked_cover %sequence if %en, posedge %clk label "sequence" : !ltl.sequence
+  verif.clocked_assert %sequence if %en, posedge %clk label "sequence_assert" : !ltl.sequence
+  verif.clocked_assume %sequence if %en, posedge %clk label "sequence_assume" : !ltl.sequence
+  %twice = ltl.repeat %a, 2, 0 : i1
+  %repeat = ltl.concat %twice, %later : !ltl.sequence, !ltl.sequence
+  verif.clocked_cover %repeat if %en, posedge %clk label "repeat" : !ltl.sequence
+  %same = ltl.implication %a, %b : i1, i1
+  verif.clocked_assert %same if %en, posedge %clk label "same" : !ltl.property
+}
+
 // CHECK-LABEL: @wrapper(
 // CHECK: verif.clocked_assert %a, negedge %clk label "wrapped"
 hw.module @wrapper(in %clk: i1, in %a: i1) {
@@ -75,6 +102,24 @@ hw.module @wrapper(in %clk: i1, in %a: i1) {
     verif.clocked_assert %a, negedge %clk label "wrapped" : i1
     cf.br ^body
   }
+  hw.output
+}
+
+// CHECK-LABEL: @history(
+// CHECK: seq.compreg %a, {{.*}} : i1
+// CHECK-NOT: initial
+// CHECK: verif.clocked_cover {{.*}}, posedge %clk label "past"
+hw.module @history(in %clk: i1, in %a: i1) {
+  %past = ltl.past %a, 2 clk %clk : i1
+  verif.clocked_cover %past, posedge %clk label "past" : i1
+  hw.output
+}
+
+// CHECK-LABEL: @explicit_clock(
+// CHECK: verif.clocked_assert %a, posedge %clk label "atom"
+hw.module @explicit_clock(in %clk: i1, in %a: i1) {
+  %atom = ltl.clocked_atom %a, posedge %clk : i1
+  verif.assert %atom label "atom" : !ltl.sequence
   hw.output
 }
 
