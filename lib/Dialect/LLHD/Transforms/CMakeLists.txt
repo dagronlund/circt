@@ -4,6 +4,7 @@ add_circt_dialect_library(CIRCTLLHDTransforms
   DeseqUtils.cpp
   HoistSignals.cpp
   InlineCalls.cpp
+  LowerFormalToCore.cpp
   LowerProcesses.cpp
   Mem2Reg.cpp
   RemoveControlFlow.cpp
@@ -19,12 +20,14 @@ add_circt_dialect_library(CIRCTLLHDTransforms
   CIRCTHW
   CIRCTLLHD
   CIRCTSeq
+  CIRCTVerif
   MLIRAnalysis
   MLIRArithDialect
   MLIRControlFlowDialect
   MLIRFuncDialect
   MLIRIR
   MLIRSCFDialect
+  MLIRTransforms
   MLIRTransformUtils
   MLIRUBDialect
 )

@@ -11,6 +11,21 @@
 
 include "mlir/Pass/PassBase.td"
 
+def LowerLLHDFormalToCorePass : Pass<"lower-llhd-formal-to-core", "ModuleOp"> {
+  let summary = "Strict verification-aware LLHD to HW/Seq/Comb lowering";
+  let description = [{
+    Predicates Boolean verification checks in acyclic combinational regions
+    and removes their procedural wrappers. Successful output contains only
+    HW, Seq, Comb and Boolean assert/assume/cover operations, apart from builtin
+    containers. Unsupported effects, processes, temporal properties, types,
+    drivers and combinational cycles fail. Conversion is transactional.
+  }];
+  let dependentDialects = [
+    "comb::CombDialect", "hw::HWDialect", "llhd::LLHDDialect",
+    "seq::SeqDialect", "verif::VerifDialect",
+  ];
+}
+
 def InlineCallsPass : Pass<"llhd-inline-calls", "ModuleOp"> {
   let summary = "Inline all function calls in HW modules";
   let description = [{

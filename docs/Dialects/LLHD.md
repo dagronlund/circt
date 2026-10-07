@@ -39,3 +39,20 @@ Instead, it applies the same transform from edge-sensitive to level-sensitive re
 ## Passes
 
 [include "LLHDPasses.md"]
+
+## Strict formal lowering
+
+`circt-opt --lower-llhd-formal-to-core` lowers supported verification-bearing
+LLHD under a synchronous, two-state formal interpretation. The initial subset
+supports Boolean checks in acyclic combinational regions. Guards are combined
+with existing enables; covers seek enabled predicates rather than implications.
+SSA values preserve statement order and merge values with muxes. Verification
+operations retain their global effect classification.
+
+Conversion is transactional. Successful output contains only HW, Seq, Comb,
+builtin containers, and the six Boolean assert/assume/cover operations including
+their clocked variants. Unsupported effects, procedural/temporal constructs,
+types, drivers, or combinational dependency cycles fail instead of leaving a
+partially lowered design. Module output dependency summaries preserve register
+boundaries across instances. This pass does not require or run
+`comb-assume-two-valued`; callers choose their handling of X/Z semantics.
