@@ -56,3 +56,18 @@ types, drivers, or combinational dependency cycles fail instead of leaving a
 partially lowered design. Module output dependency summaries preserve register
 boundaries across instances. This pass does not require or run
 `comb-assume-two-valued`; callers choose their handling of X/Z semantics.
+
+Single-edge sequential processes extract registers and immediate checks from
+the same edge-specialized SSA computation. Checks observe current state before
+simultaneous nonblocking updates; blocking local assignments affect later checks.
+Both positive and negative edges are supported. Checks before the first wait,
+unrelated clocks, general process loops, and event-region dependencies fail.
+Property-only trampoline/self-loop wrappers are recognized separately. Only
+scheduled nonblocking drives may commute across verification observations.
+
+Constant native LLHD signal initial values become register presets. Frontend
+integer variables carry `llhd.explicit_init` or `llhd.unconstrained` provenance;
+implicit scheduling zeros and initial wait placeholders do not constrain state.
+Explicit constant initialization survives the ordinary frontend pipeline.
+Nonconstant formal register initialization is rejected. Legacy IR without
+provenance cannot recover source initialization that was already discarded.

@@ -32,6 +32,40 @@ using namespace circt;
 using namespace circt::llhd;
 
 namespace {
+/// Recognize only the frontend's property-only trampoline/self-loop wrapper.
+/// Its loop describes a concurrent property, not repeated procedural execution.
+LogicalResult unwrapPropertyProcess(ProcessOp process) {
+  auto &region = process.getBody();
+  if (process.getNumResults() || region.getBlocks().size() != 2)
+    return failure();
+  auto &entry = region.front();
+  auto &body = region.back();
+  auto entryBr = dyn_cast<cf::BranchOp>(entry.getTerminator());
+  auto backBr = dyn_cast<cf::BranchOp>(body.getTerminator());
+  if (!entry.without_terminator().empty() || !entryBr || !backBr ||
+      entryBr.getDest() != &body || backBr.getDest() != &body ||
+      body.getNumArguments())
+    return failure();
+  bool hasCheck = false;
+  for (auto &op : body.without_terminator()) {
+    if (isClockedFormalCheck(&op)) {
+      hasCheck = true;
+      continue;
+    }
+    if (!isMemoryEffectFree(&op) || op.getNumRegions() ||
+        !(op.getName().getDialectNamespace() == "comb" ||
+          op.getName().getDialectNamespace() == "hw" ||
+          op.getName().getDialectNamespace() == "ltl"))
+      return failure();
+  }
+  if (!hasCheck)
+    return failure();
+  while (!body.without_terminator().empty())
+    body.front().moveBefore(process);
+  process.erase();
+  return success();
+}
+
 LogicalResult preflight(ModuleOp module, bool normalized = false) {
   auto result = module.walk([&](Operation *op) -> WalkResult {
     auto dialect = op->getName().getDialectNamespace();
@@ -264,18 +298,35 @@ struct LowerLLHDFormalToCorePass
     });
     if (temporal.wasInterrupted())
       return failure();
-    auto processes = module.walk([&](ProcessOp op) -> WalkResult {
-      op.emitError("unsupported formal process: sequential lowering is not yet "
-                   "supported");
-      return WalkResult::interrupt();
-    });
-    if (processes.wasInterrupted())
-      return failure();
     PassManager storage(&getContext());
     storage.addNestedPass<hw::HWModuleOp>(createMem2RegPass());
     if (failed(runPipeline(storage, module)))
       return failure();
-    // Simplify unreachable blocks before CFG predication.
+    hoistFormalSignals(module);
+    if (failed(preflight(module, true)))
+      return failure();
+    SmallVector<ProcessOp> processes;
+    module.walk([&](ProcessOp op) { processes.push_back(op); });
+    for (auto process : processes) {
+      if (succeeded(unwrapPropertyProcess(process)))
+        continue;
+      if (failed(deseqFormal(process)))
+        return failure();
+    }
+    PassManager processesPM(&getContext());
+    processesPM.addNestedPass<hw::HWModuleOp>(createLowerProcessesPass());
+    if (failed(runPipeline(processesPM, module)))
+      return failure();
+    auto remaining = module.walk([&](ProcessOp op) -> WalkResult {
+      op.emitError(
+          "unsupported formal process: expected a recognizable single-edge "
+          "clocked process or a property-only wrapper; multiple clocks, "
+          "event-region dependencies and general loops are unsupported");
+      return WalkResult::interrupt();
+    });
+    if (remaining.wasInterrupted())
+      return failure();
+    // Remove unreachable edge-specialization blocks before CFG predication.
     if (failed(cleanup(module)))
       return failure();
     SmallVector<CombinationalOp> combinational;

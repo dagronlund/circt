@@ -131,6 +131,43 @@ def combinational(text):
     assert got == expected, (got, expected)
 
 
+def procedural(text):
+  for trace in itertools.product(range(4), repeat=4):
+    circuit = Circuit(text)
+    q, r = 0, 1
+    for bits in trace:
+      en, d = bits & 1, bits >> 1
+      got = circuit.sample({'%clk': 1, '%en': en, '%d': d})
+      assert got == {
+          'oldq': bool(en and not q),
+          'oldr': bool(en and not r),
+          'blocking': bool(en and not q)
+      }, (trace, got, q, r)
+      if en:
+        q, r = d, q
+      assert circuit.state['%qs'] == q and circuit.state['%rs'] == r
+
+
 text = sys.stdin.read()
 combinational(extract(text, 'combinational'))
-print('Exhaustive combinational traces passed')
+procedural(extract(text, 'procedural'))
+wrapper = Circuit(extract(text, 'wrapper'))
+assert wrapper.sample({'%clk': 0, '%a': 0}, 'neg')['wrapped']
+assert not wrapper.sample({'%clk': 0, '%a': 1}, 'neg')['wrapped']
+
+# The scheduling zero must not constrain the initial state of this register.
+for initial in range(2):
+  circuit = Circuit(extract(text, 'unconstrained'), initial)
+  assert list(circuit.state.values()) == [initial]
+  circuit.sample({'%clk': 1, '%d': 1 - initial})
+  assert list(circuit.state.values()) == [1 - initial]
+
+for trace in itertools.product(range(2), repeat=4):
+  circuit = Circuit(extract(text, 'raw_nonblocking'))
+  q = 1
+  for d in trace:
+    observed = circuit.sample({'%clk': 1, '%d': d})
+    assert observed == {'raw_before': not q, 'raw_after': not q}
+    q = d
+
+print('Exhaustive combinational and sequential traces passed')

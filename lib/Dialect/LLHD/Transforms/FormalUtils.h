@@ -24,6 +24,8 @@ inline bool isClockedFormalCheck(mlir::Operation *op) {
 }
 /// These utilities deliberately do not change the simulation passes' defaults.
 void removeFormalControlFlow(CombinationalOp op);
+mlir::LogicalResult deseqFormal(ProcessOp op);
+void hoistFormalSignals(mlir::Operation *op);
 } // namespace circt::llhd
 
 #endif // CIRCT_DIALECT_LLHD_TRANSFORMS_FORMALUTILS_H

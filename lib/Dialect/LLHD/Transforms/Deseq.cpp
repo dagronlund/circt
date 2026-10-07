@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DeseqUtils.h"
+#include "FormalUtils.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypeInterfaces.h"
@@ -202,7 +203,13 @@ static ValueField getValueField(Value value) {
 
 /// The work horse promoting processes into concrete registers.
 struct Deseq {
-  Deseq(ProcessOp process) : process(process) {}
+  Deseq(ProcessOp process, bool formal = false)
+      : formal(formal), process(process) {}
+  bool formal;
+  bool emittedError = false;
+  bool matchChecks();
+  Value checkClock;
+  bool checkRising = true;
   void deseq();
 
   bool analyzeProcess();
@@ -340,23 +347,40 @@ void Deseq::deseq() {
   // For each drive fed by this process determine the exact triggers that cause
   // them to drive a new value, and ensure that the behavior can be represented
   // by a register.
-  if (!matchDrives())
+  if (!matchDrives() || (formal && !matchChecks()))
     return;
+  if (formal)
+    for (auto &drive : driveInfos)
+      if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>()) {
+        IntegerAttr init;
+        auto *initOp = signal.getInit().getDefiningOp();
+        if (!signal->hasAttr("llhd.unconstrained") &&
+            !matchPattern(signal.getInit(), m_Constant(&init)) &&
+            !(initOp && initOp->getName().getStringRef() == "ub.poison")) {
+          signal.emitError(
+              "nonconstant register initialization is unsupported");
+          emittedError = true;
+          return;
+        }
+      }
 
   // Preserve explicit frontend initialization before the normal frontend
   // pipeline has a chance to discard its signal. Dynamic initializers remain
   // in LLHD so the formal path can diagnose them rather than lose constraints.
-  for (auto &drive : driveInfos)
-    if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>();
-        signal && signal->hasAttr("llhd.explicit_init")) {
-      IntegerAttr init;
-      if (!matchPattern(signal.getInit(), m_Constant(&init)))
-        return;
-    }
+  if (!formal)
+    for (auto &drive : driveInfos)
+      if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>();
+          signal && signal->hasAttr("llhd.explicit_init")) {
+        IntegerAttr init;
+        if (!matchPattern(signal.getInit(), m_Constant(&init)))
+          return;
+      }
 
   // Make the drives unconditional and capture the conditional behavior as
   // register operations.
   implementRegisters();
+  if (checkClock)
+    specializeProcess({{checkClock, !checkRising, checkRising}});
 
   // At this point the process has been replaced with specialized versions of it
   // for the different triggers and can be removed.
@@ -374,7 +398,7 @@ bool Deseq::analyzeProcess() {
   // the `WaitOp` or `HaltOp` terminators.
   for (auto &block : process.getBody()) {
     for (auto &op : block) {
-      if (isa<WaitOp, HaltOp>(op))
+      if (isa<WaitOp, HaltOp>(op) || (formal && isFormalCheck(&op)))
         continue;
       if (!isMemoryEffectFree(&op)) {
         LLVM_DEBUG({
@@ -715,6 +739,14 @@ TruthTable Deseq::computeBoolean(OpResult value) {
   // Handle constants.
   if (auto constOp = dyn_cast<hw::ConstantOp>(op))
     return getConstBoolean(constOp.getValue().isOne());
+
+  // In the synchronous formal model, sampled history, register outputs and
+  // instance results outside the process are current-state observations. A
+  // clock operand of an instance or history operator is not a combinational
+  // dependence of that observed value on the edge detector being analyzed.
+  if (formal && !process.getBody().isAncestor(op->getParentRegion()) &&
+      op->getName().getDialectNamespace() != "comb")
+    return getUnknownBoolean();
 
   // Handle `comb.or`.
   if (auto orOp = dyn_cast<comb::OrOp>(op)) {
@@ -1454,7 +1486,7 @@ void Deseq::implementRegister(DriveInfo &drive) {
   // an undefined signal initial value leaves the register unconstrained.
   IntegerAttr preset;
   if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>())
-    if (signal->hasAttr("llhd.explicit_init") &&
+    if ((formal || signal->hasAttr("llhd.explicit_init")) &&
         !signal->hasAttr("llhd.unconstrained"))
       matchPattern(signal.getInit(), m_Constant(&preset));
 
@@ -1642,6 +1674,26 @@ ValueRange Deseq::specializeProcess(FixedValues fixedValues) {
           }
         }
 
+        // Checks and state use the same edge-specialized SSA computation.
+        // The original waveform must remain the clock of the extracted check.
+        if (formal && isFormalCheck(&oldOp)) {
+          assert(!stopAtWait && "check before first wait");
+          auto name = oldOp.getName().getStringRef();
+          std::string clockedName = "verif.clocked_" + name.drop_front(6).str();
+          OperationState state(oldOp.getLoc(), clockedName);
+          state.addOperands(mapping.lookupOrDefault(oldOp.getOperand(0)));
+          state.addOperands(checkClock);
+          if (oldOp.getNumOperands() == 2)
+            state.addOperands(mapping.lookupOrDefault(oldOp.getOperand(1)));
+          state.addAttributes(oldOp.getAttrs());
+          state.addAttribute("edge", verif::ClockEdgeAttr::get(
+                                         builder.getContext(),
+                                         checkRising ? verif::ClockEdge::Pos
+                                                     : verif::ClockEdge::Neg));
+          builder.create(state);
+          continue;
+        }
+
         // Otherwise clone the operation.
         for (auto &blockOperand : oldOp.getBlockOperands())
           scheduleBlock(blockOperand.get());
@@ -1727,4 +1779,66 @@ void DeseqPass::runOnOperation() {
   SmallVector<ProcessOp> processes(getOperation().getOps<ProcessOp>());
   for (auto process : processes)
     Deseq(process).deseq();
+}
+
+// Verify that every immediate check executes on one common, recognized edge.
+// Unknown data conditions are allowed; clock conditions outside that edge are
+// not. Multiple clocks/resets need event-region analysis and are rejected here.
+bool Deseq::matchChecks() {
+  SmallVector<Operation *> checks;
+  process.walk([&](Operation *op) {
+    if (isFormalCheck(op))
+      checks.push_back(op);
+  });
+  if (checks.empty())
+    return true;
+  // Entry executes once before the first wait, not on a sampling edge. Do not
+  // accidentally clock checks in initialization code (or clone them twice).
+  SmallVector<Block *> worklist{&process.getBody().front()};
+  SmallPtrSet<Block *, 8> seen;
+  while (!worklist.empty()) {
+    auto *block = worklist.pop_back_val();
+    if (!seen.insert(block).second)
+      continue;
+    for (auto &op : *block)
+      if (isFormalCheck(&op))
+        return false;
+    if (!isa<WaitOp, HaltOp>(block->getTerminator()))
+      for (auto *successor : block->getSuccessors())
+        worklist.push_back(successor);
+  }
+
+  if (triggers.size() != 1 || wait.getDelay())
+    return false;
+  checkClock = triggers.front().getProjected();
+  // The clock must be available outside the process.
+  if (process.getBody().isAncestor(checkClock.getParentRegion()))
+    return false;
+  auto pos = ~getPastTrigger(0) & getPresentTrigger(0);
+  auto neg = getPastTrigger(0) & ~getPresentTrigger(0);
+  bool canPos = true, canNeg = true;
+  for (auto *op : checks) {
+    if (isClockedFormalCheck(op) ||
+        !op->getOperand(0).getType().isSignlessInteger(1))
+      return false;
+    auto condition = computeBlockCondition(op->getBlock());
+    if (condition.isPoison())
+      return false;
+    canPos &= (condition & ~pos).isFalse();
+    canNeg &= (condition & ~neg).isFalse();
+  }
+  if (!canPos && !canNeg)
+    return false;
+  checkRising = canPos;
+  for (auto &drive : driveInfos)
+    if (drive.reset || drive.clock.clock != checkClock ||
+        drive.clock.risingEdge != checkRising)
+      return false;
+  return true;
+}
+
+LogicalResult circt::llhd::deseqFormal(ProcessOp op) {
+  Deseq deseq(op, true);
+  deseq.deseq();
+  return failure(deseq.emittedError);
 }

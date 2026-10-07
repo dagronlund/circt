@@ -66,21 +66,37 @@ hw.module @unused_temporal_input(in %p: !ltl.property) {
 
 // -----
 
-hw.module @early_temporal(in %clk: i1, in %a: i1) {
-  %p = ltl.delay %a, 1, 0 : i1
-  // expected-error @+1 {{temporal verification is not yet supported}}
-  verif.clocked_assert %p, posedge %clk : !ltl.sequence
+hw.module @immediate_loop(in %a: i1) {
+  // expected-error @+1 {{unsupported formal process}}
+  llhd.process {
+    cf.br ^body
+  ^body:
+    verif.assert %a : i1
+    cf.br ^body
+  }
   hw.output
 }
 
 // -----
 
-hw.module @early_process(in %clk: i1) {
-  // expected-error @+1 {{sequential lowering is not yet supported}}
+hw.module @before_wait(in %clk: i1, in %a: i1) {
+  // expected-error @+1 {{unsupported formal process}}
   llhd.process {
+    verif.assert %a : i1
     cf.br ^wait
   ^wait:
-    llhd.wait (%clk : i1), ^wait
+    llhd.wait (%clk : i1), ^edge(%clk : i1)
+  ^edge(%old: i1):
+    cf.br ^wait
   }
+  hw.output
+}
+
+// -----
+
+hw.module @early_temporal(in %clk: i1, in %a: i1) {
+  %p = ltl.delay %a, 1, 0 : i1
+  // expected-error @+1 {{temporal verification is not yet supported}}
+  verif.clocked_assert %p, posedge %clk : !ltl.sequence
   hw.output
 }
