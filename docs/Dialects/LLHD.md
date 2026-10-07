@@ -39,3 +39,86 @@ Instead, it applies the same transform from edge-sensitive to level-sensitive re
 ## Passes
 
 [include "LLHDPasses.md"]
+
+## Strict formal lowering
+
+`circt-opt --lower-llhd-formal-to-core` lowers supported verification-bearing
+LLHD under a synchronous, two-state formal interpretation. The initial subset
+supports Boolean checks in acyclic combinational regions. Guards are combined
+with existing enables; covers seek enabled predicates rather than implications.
+SSA values preserve statement order and merge values with muxes. Verification
+operations retain their global effect classification.
+
+Conversion is transactional. Successful output contains only HW, Seq, Comb,
+builtin containers, and the six Boolean assert/assume/cover operations including
+their clocked variants. Unsupported effects, procedural/temporal constructs,
+types, drivers, or combinational dependency cycles fail instead of leaving a
+partially lowered design. Module output dependency summaries preserve register
+boundaries across instances. This pass does not require or run
+`comb-assume-two-valued`; callers choose their handling of X/Z semantics.
+
+Single-edge sequential processes extract registers and immediate checks from
+the same edge-specialized SSA computation. Checks observe current state before
+simultaneous nonblocking updates; blocking local assignments affect later checks.
+Both positive and negative edges are supported. Checks before the first wait,
+unrelated clocks, general process loops, and event-region dependencies fail.
+Property-only trampoline/self-loop wrappers are recognized separately. Only
+scheduled nonblocking drives may commute across verification observations.
+
+Constant native LLHD signal initial values become register presets. Frontend
+integer variables carry `llhd.explicit_init` or `llhd.unconstrained` provenance;
+implicit scheduling zeros and initial wait placeholders do not constrain state.
+Explicit constant initialization survives the ordinary frontend pipeline.
+Nonconstant formal register initialization is rejected. Legacy IR without
+provenance cannot recover source initialization that was already discarded.
+
+The temporal subset supports Boolean expressions and implication, explicit
+clock scopes/atoms, fixed delays, finite concatenation, fixed consecutive
+repetition, and sampled history. Concatenation overlaps endpoints; next-cycle
+implication uses `concat(a, delay(true, 1, 0))`. Pipelines track every overlapping
+attempt. Assert/assume monitors check each required sample; covers report completed
+non-vacuous matches. Pending bits start false, while sampled history remains
+unconstrained initially. `max-monitor-depth` defaults to 256; overflow and
+unsupported, variable, or unbounded temporal forms fail.
+
+For temporal checks, the existing enable denotes `disable iff`; its negation
+asynchronously clears active attempts, including pulses between sampling edges.
+This differs from procedural reachability. Guarded temporal CFG checks requiring
+separate start/disable predicates are rejected. Pending attempts at a bounded
+trace's end remain state rather than automatically becoming failures.
+
+The result is hardware, not a proof or a checking problem. Backends must support
+the remaining clocks, initialization, asynchronous reset, and cover operations.
+The unchanged CIRCT BMC register externalizer rejects asynchronous reset;
+backend compatibility is checked independently of formal IR legality.
+
+Before cycle analysis, packed-vector extracts are distributed through bitwise
+OR, then folded through concatenations and constants. This exposes relevant
+lanes without discarding full packed outputs. The OR's `twoState` flag and
+attributes are retained. OR slice expansion is bounded to 65,536 cloned
+operations; exceeding the budget fails. Genuine feedback remains an error.
+
+`circt-verilog --lower-llhd-formal-to-core` runs the strict pass after the normal
+HW pipeline, with default output or `--ir-hw`. Earlier output modes conflict with
+this option. This matches emitting HW IR and running the pass with `circt-opt`.
+The flag remains opt-in; making safe combinational lowering automatic would be
+a separate design decision and does not remove the strict completion contract.
+
+Structural/negative tests and exhaustive small traces check guards, sampling,
+initialization, assumptions, failures, witnesses, and between-edge cancellation.
+The stream-stage Verilator regression compares all eight source cover counts
+over the same 10,000-cycle traffic trace. This is finite regression evidence,
+not an unbounded equivalence proof. BMC source is unchanged by this series.
+
+Time-valued data is lowered to unsigned `i64` femtosecond counts before process
+and register extraction. Module/instance ports, references, aggregates, and CFG
+values are converted together; `llhd.int_to_time` and `llhd.time_to_int` become
+identities. The frontend's timescale arithmetic is retained. Explicit constant
+time initialization survives as a register preset, while implicit frontend
+scheduling defaults leave initial state unconstrained.
+
+Scheduling operands keep their LLHD time representation until consumed by the
+existing lowering. Data constants with delta/epsilon components, sub-femtosecond
+units, or overflow beyond unsigned 64-bit femtoseconds are rejected. Simulation
+time queries such as `$time` and dynamic or real-time scheduling delays remain
+unsupported.

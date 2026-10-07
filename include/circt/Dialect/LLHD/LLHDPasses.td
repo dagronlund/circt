@@ -11,6 +11,25 @@
 
 include "mlir/Pass/PassBase.td"
 
+def LowerLLHDFormalToCorePass : Pass<"lower-llhd-formal-to-core", "ModuleOp"> {
+  let summary = "Strict verification-aware LLHD to HW/Seq/Comb lowering";
+  let description = [{
+    Converts acyclic combinational checks and recognizable single-edge LLHD
+    processes under a synchronous two-state sampling model. Lowers fixed finite
+    temporal monitors, preserving asynchronous cancellation and initial state.
+    Successful output contains only HW, Seq, Comb and Boolean assert/assume/cover
+    operations (including their clocked variants). Unsupported constructs fail.
+    Pending finite obligations are retained as state at a bounded trace's end;
+    this pass does not impose a strong end-of-trace failure policy.
+  }];
+  let dependentDialects = [
+    "comb::CombDialect", "hw::HWDialect", "llhd::LLHDDialect",
+    "ltl::LTLDialect", "seq::SeqDialect", "verif::VerifDialect",
+  ];
+  let options = [Option<"maxMonitorDepth", "max-monitor-depth", "unsigned",
+                       "256", "Maximum expanded temporal monitor depth">];
+}
+
 def InlineCallsPass : Pass<"llhd-inline-calls", "ModuleOp"> {
   let summary = "Inline all function calls in HW modules";
   let description = [{

@@ -153,6 +153,12 @@ struct CLOptions {
       cl::desc("Destructure arrays and structs into individual signals."),
       cl::init(false), cl::cat(cat)};
 
+  cl::opt<bool> lowerLLHDFormalToCore{
+      "lower-llhd-formal-to-core",
+      cl::desc("Strictly lower supported formal verification to HW/Seq/Comb "
+               "and Boolean Verif operations after HW lowering"),
+      cl::init(false), cl::cat(cat)};
+
   //===--------------------------------------------------------------------===//
   // Include paths
   //===--------------------------------------------------------------------===//
@@ -332,6 +338,8 @@ static void populatePasses(PassManager &pm) {
   options.detectMemories = opts.detectMemories;
   options.sroa = opts.sroa;
   populateLlhdToCorePipeline(pm, options);
+  if (opts.lowerLLHDFormalToCore)
+    pm.addPass(llhd::createLowerLLHDFormalToCorePass());
 }
 
 //===----------------------------------------------------------------------===//
@@ -463,6 +471,14 @@ static LogicalResult executeWithSources(MLIRContext *context,
 }
 
 static LogicalResult execute(MLIRContext *context) {
+  if (opts.lowerLLHDFormalToCore &&
+      opts.loweringMode != LoweringMode::OutputIRHW &&
+      opts.loweringMode != LoweringMode::Full) {
+    WithColor::error() << "--lower-llhd-formal-to-core requires --ir-hw or "
+                          "default HW output\n";
+    return failure();
+  }
+
   // Default to reading from stdin if no files were provided except if
   // commandfiles were.
   if (opts.inputFilenames.empty() && opts.commandFiles.empty()) {

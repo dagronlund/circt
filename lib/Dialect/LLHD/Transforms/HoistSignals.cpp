@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "FormalUtils.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
 #include "mlir/Analysis/Liveness.h"
@@ -37,7 +38,9 @@ using llvm::SmallSetVector;
 namespace {
 /// The struct performing the hoisting of probes in a single region.
 struct ProbeHoister {
-  ProbeHoister(Region &region) : region(region) {}
+  ProbeHoister(Region &region, bool formal = false)
+      : formal(formal), region(region) {}
+  bool formal;
   void hoist();
 
   void findValuesLiveAcrossWait(Liveness &liveness);
@@ -142,7 +145,7 @@ void ProbeHoister::hoistProbes() {
       // themselves and the beginning of a block. If we see a side-effecting op,
       // give up on this block.
       if (!probeOp) {
-        if (isMemoryEffectFree(&op))
+        if (isMemoryEffectFree(&op) || (formal && isFormalCheck(&op)))
           continue;
         else
           break;
@@ -277,7 +280,9 @@ static llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
 namespace {
 /// The struct performing the hoisting of drives in a process.
 struct DriveHoister {
-  DriveHoister(ProcessOp processOp) : processOp(processOp) {}
+  DriveHoister(ProcessOp processOp, bool formal = false)
+      : formal(formal), processOp(processOp) {}
+  bool formal;
   void hoist();
 
   void findHoistableSlots();
@@ -362,6 +367,7 @@ void DriveHoister::collectDriveSets() {
     suspendOps.push_back(terminator);
 
     bool beyondSideEffect = false;
+    bool beyondCheck = false;
     laterDrives.clear();
 
     for (auto &op : llvm::make_early_inc_range(
@@ -372,9 +378,21 @@ void DriveHoister::collectDriveSets() {
       // themselves and the terminator of the block. If we see a side-effecting
       // op, give up on this block.
       if (!driveOp) {
-        if (!isMemoryEffectFree(&op))
+        if (formal && isFormalCheck(&op))
+          beyondCheck = true;
+        else if (!isMemoryEffectFree(&op))
           beyondSideEffect = true;
         continue;
+      }
+
+      // Only nonblocking scheduled writes commute across a verification
+      // observation. Blocking/local writes must have been promoted to SSA.
+      if (formal && beyondCheck) {
+        TimeAttr time;
+        if (!matchPattern(driveOp.getTime(), m_Constant(&time)) ||
+            time.getTime() != 0 || time.getDelta() != 1 ||
+            time.getEpsilon() != 0)
+          beyondSideEffect = true;
       }
 
       // Check if we can hoist drives to this signal.
@@ -697,5 +715,20 @@ void HoistSignalsPass::runOnOperation() {
     ProbeHoister(*region).hoist();
     if (auto processOp = dyn_cast<ProcessOp>(region->getParentOp()))
       DriveHoister(processOp).hoist();
+  }
+}
+
+void circt::llhd::hoistFormalSignals(Operation *op) {
+  SmallVector<Region *> regions;
+  op->walk([&](Operation *nested) {
+    if (isa<ProcessOp, CombinationalOp>(nested))
+      for (auto &region : nested->getRegions())
+        if (!region.empty())
+          regions.push_back(&region);
+  });
+  for (auto *region : regions) {
+    ProbeHoister(*region, true).hoist();
+    if (auto process = dyn_cast<ProcessOp>(region->getParentOp()))
+      DriveHoister(process, true).hoist();
   }
 }

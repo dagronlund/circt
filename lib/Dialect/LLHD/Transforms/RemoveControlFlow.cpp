@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "FormalUtils.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
@@ -158,7 +159,9 @@ static Condition getBranchDecisionsFromDominatorToTarget(
 namespace {
 /// The main helper struct implementing control flow removal for a region.
 struct CFRemover {
-  CFRemover(Region &region) : region(region) {}
+  CFRemover(Region &region, bool formal = false)
+      : formal(formal), region(region) {}
+  bool formal;
   void run();
 
   /// The region within which we are removing control flow.
@@ -194,7 +197,7 @@ void CFRemover::run() {
 
     // Give up if there are any side-effecting ops in the region.
     for (auto &op : block) {
-      if (!isMemoryEffectFree(&op)) {
+      if (!isMemoryEffectFree(&op) && !(formal && isFormalCheck(&op))) {
         LLVM_DEBUG(llvm::dbgs() << "- Has side effects, giving up\n");
         return;
       }
@@ -350,6 +353,30 @@ void CFRemover::run() {
          llvm::zip(block->getArguments(), mergedArgs))
       blockArg.replaceAllUsesWith(mergedArg);
 
+    // Verification effects are predicated explicitly, never declared pure.
+    // Keep enables on covers: implication would turn disabled paths into hits.
+    if (formal && block != entryBlock) {
+      auto decision = getBranchDecisionsFromDominatorToTarget(
+          builder, entryBlock, block, decisionCache);
+      auto guard = decision.materialize(builder, region.getLoc());
+      for (auto &op : block->without_terminator()) {
+        if (!isFormalCheck(&op))
+          continue;
+        unsigned index = isClockedFormalCheck(&op) ? 2 : 1;
+        SmallVector<Value> operands(op.getOperands());
+        Value enable = guard;
+        if (operands.size() > index) {
+          OpBuilder checkBuilder(&op);
+          enable = checkBuilder.createOrFold<comb::AndOp>(
+              op.getLoc(), operands[index], guard);
+          operands[index] = enable;
+        } else {
+          operands.push_back(enable);
+        }
+        op.setOperands(operands);
+      }
+    }
+
     // Move all ops except for the terminator into the entry block.
     if (block != entryBlock)
       entryBlock->getOperations().splice(--entryBlock->end(),
@@ -390,4 +417,8 @@ struct RemoveControlFlowPass
 void RemoveControlFlowPass::runOnOperation() {
   for (auto op : getOperation().getOps<CombinationalOp>())
     CFRemover(op.getBody()).run();
+}
+
+void circt::llhd::removeFormalControlFlow(CombinationalOp op) {
+  CFRemover(op.getBody(), true).run();
 }
