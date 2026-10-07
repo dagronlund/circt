@@ -343,6 +343,17 @@ void Deseq::deseq() {
   if (!matchDrives())
     return;
 
+  // Preserve explicit frontend initialization before the normal frontend
+  // pipeline has a chance to discard its signal. Dynamic initializers remain
+  // in LLHD so the formal path can diagnose them rather than lose constraints.
+  for (auto &drive : driveInfos)
+    if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>();
+        signal && signal->hasAttr("llhd.explicit_init")) {
+      IntegerAttr init;
+      if (!matchPattern(signal.getInit(), m_Constant(&init)))
+        return;
+    }
+
   // Make the drives unconditional and capture the conditional behavior as
   // register operations.
   implementRegisters();
@@ -1438,10 +1449,19 @@ void Deseq::implementRegister(DriveInfo &drive) {
   if (!name)
     name = builder.getStringAttr("");
 
+  // Signal initial values are actual initial state, unlike the placeholder
+  // values yielded by the process before its first wait. Preserve constants;
+  // an undefined signal initial value leaves the register unconstrained.
+  IntegerAttr preset;
+  if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>())
+    if (signal->hasAttr("llhd.explicit_init") &&
+        !signal->hasAttr("llhd.unconstrained"))
+      matchPattern(signal.getInit(), m_Constant(&preset));
+
   // Create the register op.
   auto reg = seq::FirRegOp::create(builder, loc, value, clock, name,
                                    hw::InnerSymAttr{},
-                                   /*preset=*/IntegerAttr{}, reset, resetValue,
+                                   /*preset=*/preset, reset, resetValue,
                                    /*isAsync=*/reset != Value{});
 
   // If the register has an enable, insert a self-mux in front of the register.

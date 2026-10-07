@@ -544,24 +544,24 @@ moore.module @MixedPortsWithAssocArray(in %valid : !moore.l1, in %data : !moore.
 // CHECK-LABEL: hw.module @Variable
 moore.module @Variable() {
   // CHECK: [[TMP0:%.+]] = hw.constant 0 : i32
-  // CHECK: %a = llhd.sig [[TMP0]] : i32
+  // CHECK: %a = llhd.sig [[TMP0]] {llhd.unconstrained} : i32
   %a = moore.variable : <i32>
 
   // CHECK: [[TMP1:%.+]] = hw.constant 0 : i8
-  // CHECK: %b1 = llhd.sig [[TMP1]] : i8
+  // CHECK: %b1 = llhd.sig [[TMP1]] {llhd.unconstrained} : i8
   %b1 = moore.variable : <i8>
 
   // CHECK: [[PRB:%.+]] = llhd.prb %b1 : i8
   %0 = moore.read %b1 : <i8>
-  // CHECK: %b2 = llhd.sig [[PRB]] : i8
+  // CHECK: %b2 = llhd.sig [[PRB]] {llhd.explicit_init} : i8
   %b2 = moore.variable %0 : <i8>
 
   // CHECK: %true = hw.constant true
   %1 = moore.constant 1 : l1
-  // CHECK: %l = llhd.sig %true : i1
+  // CHECK: %l = llhd.sig %true {llhd.explicit_init} : i1
   %l = moore.variable %1 : <l1>
   // CHECK: [[TMP:%.+]] = hw.constant 0 : i19
-  // CHECK: %m = llhd.sig [[TMP]] : i19
+  // CHECK: %m = llhd.sig [[TMP]] {llhd.unconstrained} : i19
   %m = moore.variable : <l19>
 
   // CHECK: [[TMP2:%.+]] = hw.constant 10 : i32

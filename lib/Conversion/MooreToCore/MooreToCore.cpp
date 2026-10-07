@@ -1142,14 +1142,22 @@ struct VariableOpConversion : public OpConversionPattern<VariableOp> {
 
     // Determine the initial value of the signal.
     Value init = adaptor.getInitial();
+    bool hasExplicitInit = bool(init);
     if (!init) {
       init = createZeroValue(refType.getNestedType(), loc, rewriter);
       if (!init)
         return failure();
     }
 
-    rewriter.replaceOpWithNewOp<llhd::SignalOp>(op, resultType,
-                                                op.getNameAttr(), init);
+    auto signal = rewriter.replaceOpWithNewOp<llhd::SignalOp>(
+        op, resultType, op.getNameAttr(), init);
+    // Preserve the provenance of the simulation scheduling default. Formal
+    // register extraction must not turn an implicit zero into a DUT constraint.
+    // Explicit initializers remain represented by the signal's initial value.
+    if (isa<IntegerType>(refType.getNestedType()))
+      signal->setAttr(hasExplicitInit ? "llhd.explicit_init"
+                                      : "llhd.unconstrained",
+                      rewriter.getUnitAttr());
     return success();
   }
 };
