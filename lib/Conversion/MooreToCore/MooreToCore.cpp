@@ -1153,8 +1153,10 @@ struct VariableOpConversion : public OpConversionPattern<VariableOp> {
         op, resultType, op.getNameAttr(), init);
     // Preserve the provenance of the simulation scheduling default. Formal
     // register extraction must not turn an implicit zero into a DUT constraint.
-    // Explicit initializers remain represented by the signal's initial value.
-    if (isa<IntegerType, llhd::TimeType>(refType.getNestedType()))
+    // This applies to aggregates as well as scalars. Explicit initializers
+    // remain represented by the signal's initial value.
+    if (hw::isHWValueType(refType.getNestedType()) ||
+        isa<llhd::TimeType>(refType.getNestedType()))
       signal->setAttr(hasExplicitInit ? "llhd.explicit_init"
                                       : "llhd.unconstrained",
                       rewriter.getUnitAttr());
