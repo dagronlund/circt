@@ -97,3 +97,15 @@ OR, then folded through concatenations and constants. This exposes relevant
 lanes without discarding full packed outputs. The OR's `twoState` flag and
 attributes are retained. OR slice expansion is bounded to 65,536 cloned
 operations; exceeding the budget fails. Genuine feedback remains an error.
+
+`circt-verilog --lower-llhd-formal-to-core` runs the strict pass after the normal
+HW pipeline, with default output or `--ir-hw`. Earlier output modes conflict with
+this option. This matches emitting HW IR and running the pass with `circt-opt`.
+The flag remains opt-in; making safe combinational lowering automatic would be
+a separate design decision and does not remove the strict completion contract.
+
+Structural/negative tests and exhaustive small traces check guards, sampling,
+initialization, assumptions, failures, witnesses, and between-edge cancellation.
+The stream-stage Verilator regression compares all eight source cover counts
+over the same 10,000-cycle traffic trace. This is finite regression evidence,
+not an unbounded equivalence proof. BMC source is unchanged by this series.
