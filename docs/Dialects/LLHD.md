@@ -91,3 +91,9 @@ The result is hardware, not a proof or a checking problem. Backends must support
 the remaining clocks, initialization, asynchronous reset, and cover operations.
 The unchanged CIRCT BMC register externalizer rejects asynchronous reset;
 backend compatibility is checked independently of formal IR legality.
+
+Before cycle analysis, packed-vector extracts are distributed through bitwise
+OR, then folded through concatenations and constants. This exposes relevant
+lanes without discarding full packed outputs. The OR's `twoState` flag and
+attributes are retained. OR slice expansion is bounded to 65,536 cloned
+operations; exceeding the budget fails. Genuine feedback remains an error.

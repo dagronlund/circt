@@ -19,6 +19,7 @@
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallBitVector.h"
@@ -406,6 +407,67 @@ LogicalResult preflight(ModuleOp module, bool normalized = false) {
   return failure(result.wasInterrupted());
 }
 
+/// Expose the lanes of packed bitwise wiring before whole-value dependency
+/// analysis. A full packed output may still be used, so width narrowing of the
+/// producer alone cannot eliminate dependencies on unrelated lanes.
+struct DistributeExtractThroughOr : OpRewritePattern<comb::ExtractOp> {
+  DistributeExtractThroughOr(MLIRContext *context, unsigned &budget,
+                             bool &exhausted)
+      : OpRewritePattern(context), budget(budget), exhausted(exhausted) {}
+
+  LogicalResult matchAndRewrite(comb::ExtractOp op,
+                                PatternRewriter &rewriter) const override {
+    auto bitwise = op.getInput().getDefiningOp<comb::OrOp>();
+    if (!bitwise || op.getType() == bitwise.getType())
+      return failure();
+    unsigned cost = bitwise.getNumOperands() + 1;
+    if (cost > budget) {
+      exhausted = true;
+      return rewriter.notifyMatchFailure(op, "packed slice expansion limit");
+    }
+    budget -= cost;
+
+    IRMapping operands;
+    for (Value input : bitwise.getInputs()) {
+      if (operands.contains(input))
+        continue;
+      IRMapping sliceInput;
+      sliceInput.map(op.getInput(), input);
+      auto *slice = rewriter.clone(*op, sliceInput);
+      operands.map(input, slice->getResult(0));
+    }
+    // Cloning retains the OR's twoState property and other attributes. The
+    // extraction itself also retains its attributes and bit offset on each
+    // input. Bitwise OR commutes with slicing in both two- and four-state
+    // logic.
+    auto *narrowed = rewriter.clone(*bitwise, operands);
+    narrowed->getResult(0).setType(op.getType());
+    rewriter.replaceOp(op, narrowed->getResult(0));
+    return success();
+  }
+
+  unsigned &budget;
+  bool &exhausted;
+};
+
+LogicalResult normalizePackedSlices(ModuleOp module) {
+  // Bound duplication across shared OR trees. Only push slices towards inputs;
+  // do not include producer rewrites that could factor them back out and
+  // oscillate. A separate cleanup folds the exposed zero-padded lanes.
+  unsigned budget = 65536;
+  bool exhausted = false;
+  RewritePatternSet patterns(module.getContext());
+  patterns.add<DistributeExtractThroughOr>(module.getContext(), budget,
+                                           exhausted);
+  comb::ExtractOp::getCanonicalizationPatterns(patterns, module.getContext());
+  if (failed(applyPatternsGreedily(module, std::move(patterns))))
+    return module.emitError("packed slice normalization did not converge");
+  if (exhausted)
+    return module.emitError(
+        "packed slice normalization exceeds expansion limit");
+  return success();
+}
+
 LogicalResult verifyCore(ModuleOp module) {
   auto result = module.walk([&](Operation *op) -> WalkResult {
     StringRef dialect = op->getName().getDialectNamespace();
@@ -652,6 +714,8 @@ struct LowerLLHDFormalToCorePass
       op.replaceAllUsesWith(core.getResult());
       op.erase();
     }
+    if (failed(normalizePackedSlices(module)) || failed(cleanup(module)))
+      return failure();
     return verifyCore(module);
   }
 };
