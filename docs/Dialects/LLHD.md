@@ -109,3 +109,16 @@ initialization, assumptions, failures, witnesses, and between-edge cancellation.
 The stream-stage Verilator regression compares all eight source cover counts
 over the same 10,000-cycle traffic trace. This is finite regression evidence,
 not an unbounded equivalence proof. BMC source is unchanged by this series.
+
+Time-valued data is lowered to unsigned `i64` femtosecond counts before process
+and register extraction. Module/instance ports, references, aggregates, and CFG
+values are converted together; `llhd.int_to_time` and `llhd.time_to_int` become
+identities. The frontend's timescale arithmetic is retained. Explicit constant
+time initialization survives as a register preset, while implicit frontend
+scheduling defaults leave initial state unconstrained.
+
+Scheduling operands keep their LLHD time representation until consumed by the
+existing lowering. Data constants with delta/epsilon components, sub-femtosecond
+units, or overflow beyond unsigned 64-bit femtoseconds are rejected. Simulation
+time queries such as `$time` and dynamic or real-time scheduling delays remain
+unsupported.

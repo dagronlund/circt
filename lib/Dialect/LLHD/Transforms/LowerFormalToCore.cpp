@@ -15,6 +15,7 @@
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
@@ -23,6 +24,8 @@
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallBitVector.h"
+#include "llvm/ADT/StringSwitch.h"
+#include <limits>
 
 namespace circt::llhd {
 #define GEN_PASS_DEF_LOWERLLHDFORMALTOCOREPASS
@@ -407,6 +410,117 @@ LogicalResult preflight(ModuleOp module, bool normalized = false) {
   return failure(result.wasInterrupted());
 }
 
+/// Time-valued data is an unsigned i64 count of femtoseconds, as in the Moore
+/// frontend. Scheduling operands retain LLHD time and are checked separately.
+/// Split constants shared by data and scheduling before rewriting types, so
+/// neither delta/epsilon scheduling nor frontend timescale arithmetic is lost.
+LogicalResult lowerTimeData(ModuleOp module) {
+  auto isSchedulingUse = [](OpOperand &use) {
+    if (auto drive = dyn_cast<DriveOp>(use.getOwner()))
+      return &use == &drive.getTimeMutable();
+    if (auto wait = dyn_cast<WaitOp>(use.getOwner()))
+      return wait.getDelay() &&
+             use.getOperandNumber() == wait.getYieldOperands().size();
+    return false;
+  };
+  SmallVector<ConstantTimeOp> constants;
+  SmallVector<Operation *> conversions;
+  auto scan = module.walk([&](Operation *op) -> WalkResult {
+    if (isa<CurrentTimeOp>(op)) {
+      op->emitError("simulation time queries are unsupported in synchronous "
+                    "formal lowering");
+      return WalkResult::interrupt();
+    }
+    for (auto &use : op->getOpOperands())
+      if (isSchedulingUse(use) && !use.get().getDefiningOp<ConstantTimeOp>()) {
+        op->emitError("dynamic time delays are unsupported in synchronous "
+                      "formal lowering");
+        return WalkResult::interrupt();
+      }
+    if (auto constant = dyn_cast<ConstantTimeOp>(op))
+      constants.push_back(constant);
+    if (isa<IntToTimeOp, TimeToIntOp>(op))
+      conversions.push_back(op);
+    return WalkResult::advance();
+  });
+  if (scan.wasInterrupted())
+    return failure();
+  for (auto constant : constants) {
+    if (llvm::all_of(constant.getResult().getUses(), isSchedulingUse))
+      continue;
+    auto attr = constant.getValue();
+    if (attr.getDelta() || attr.getEpsilon())
+      return constant.emitError(
+          "time-valued data cannot contain delta or epsilon components");
+    uint64_t scale = llvm::StringSwitch<uint64_t>(attr.getTimeUnit())
+                         .Case("fs", 1)
+                         .Case("ps", 1000)
+                         .Case("ns", 1000000)
+                         .Case("us", 1000000000)
+                         .Case("ms", 1000000000000)
+                         .Case("s", 1000000000000000)
+                         .Default(0);
+    if (!scale)
+      return constant.emitError(
+          "time-valued data with units smaller than fs is unsupported");
+    if (attr.getTime() > std::numeric_limits<uint64_t>::max() / scale)
+      return constant.emitError(
+          "time-valued data does not fit into i64 femtoseconds");
+    OpBuilder builder(constant);
+    auto value = hw::ConstantOp::create(
+        builder, constant.getLoc(),
+        builder.getIntegerAttr(builder.getI64Type(),
+                               APInt(64, attr.getTime() * scale)));
+    constant.getResult().replaceUsesWithIf(
+        value, [&](OpOperand &use) { return !isSchedulingUse(use); });
+  }
+  // Update module/instance ports, nested aggregate/ref types, SSA results and
+  // block arguments together. There is no pass boundary while the identity
+  // conversions are temporarily ill-typed; all work is on the transaction
+  // clone.
+  AttrTypeReplacer replacer;
+  replacer.addReplacement([](TimeType type) -> Type {
+    return IntegerType::get(type.getContext(), 64);
+  });
+  // Handwritten field/port lists are not exposed as type sub-elements.
+  replacer.addReplacement([&](hw::StructType type) -> Type {
+    SmallVector<hw::StructType::FieldInfo> fields(type.getElements());
+    for (auto &field : fields)
+      field.type = replacer.replace(field.type);
+    return hw::StructType::get(type.getContext(), fields);
+  });
+  replacer.addReplacement([&](hw::UnionType type) -> Type {
+    SmallVector<hw::UnionType::FieldInfo> fields(type.getElements());
+    for (auto &field : fields)
+      field.type = replacer.replace(field.type);
+    return hw::UnionType::get(type.getContext(), fields);
+  });
+  replacer.addReplacement([&](hw::ModuleType type) -> Type {
+    SmallVector<hw::ModulePort> ports(type.getPorts());
+    for (auto &port : ports)
+      port.type = replacer.replace(port.type);
+    return hw::ModuleType::get(type.getContext(), ports);
+  });
+  // Keep any unhandled time attributes intact for the final legality check.
+  replacer.addReplacement(
+      [](TimeAttr attr) -> std::optional<std::pair<Attribute, WalkResult>> {
+        return std::make_pair(attr, WalkResult::skip());
+      });
+  module.walk([&](Operation *op) {
+    if (!isa<ConstantTimeOp>(op))
+      replacer.replaceElementsIn(op, /*replaceAttrs=*/true,
+                                 /*replaceLocs=*/false, /*replaceTypes=*/true);
+  });
+  for (auto *op : conversions) {
+    op->getResult(0).replaceAllUsesWith(op->getOperand(0));
+    op->erase();
+  }
+  for (auto constant : constants)
+    if (constant->use_empty())
+      constant.erase();
+  return success();
+}
+
 /// Expose the lanes of packed bitwise wiring before whole-value dependency
 /// analysis. A full packed output may still be used, so width narrowing of the
 /// producer alone cannot eliminate dependencies on unrelated lanes.
@@ -472,17 +586,28 @@ LogicalResult verifyCore(ModuleOp module) {
   auto result = module.walk([&](Operation *op) -> WalkResult {
     StringRef dialect = op->getName().getDialectNamespace();
     bool badType = false;
-    auto checkType = [&](Type type) {
+    std::function<void(Type)> checkType = [&](Type type) {
       type.walk([&](Type nested) {
         auto dialect = nested.getDialect().getNamespace();
         badType |= dialect != "builtin" && dialect != "hw" && dialect != "seq";
         badType |= isa<FloatType, ComplexType>(nested);
+        if (auto structure = dyn_cast<hw::StructType>(nested))
+          for (auto &field : structure.getElements())
+            checkType(field.type);
+        if (auto unionType = dyn_cast<hw::UnionType>(nested))
+          for (auto &field : unionType.getElements())
+            checkType(field.type);
       });
     };
     for (Type type : op->getOperandTypes())
       checkType(type);
     for (Type type : op->getResultTypes())
       checkType(type);
+    for (auto attr : op->getAttrs())
+      attr.getValue().walk(checkType);
+    if (auto moduleLike = dyn_cast<hw::HWModuleLike>(op))
+      for (auto &port : moduleLike.getHWModuleType().getPorts())
+        checkType(port.type);
     for (auto &region : op->getRegions())
       for (auto &block : region)
         for (auto arg : block.getArguments())
@@ -621,6 +746,8 @@ struct LowerLLHDFormalToCorePass
     if (!maxMonitorDepth)
       return module.emitError("max-monitor-depth must be positive");
     if (failed(preflight(module)))
+      return failure();
+    if (failed(lowerTimeData(module)))
       return failure();
     PassManager storage(&getContext());
     storage.addNestedPass<hw::HWModuleOp>(createMem2RegPass());

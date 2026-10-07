@@ -576,11 +576,11 @@ moore.module @Variable() {
   moore.variable : <!moore.chandle>
 
   // CHECK: [[TMP:%.+]] = llhd.constant_time <0
-  // CHECK: llhd.sig [[TMP]] : !llhd.time
+  // CHECK: llhd.sig [[TMP]] {llhd.unconstrained} : !llhd.time
   moore.variable : <!moore.time>
 
   // CHECK: [[TMP:%.+]] = llhd.constant_time
-  // CHECK: llhd.sig [[TMP]] : !llhd.time
+  // CHECK: llhd.sig [[TMP]] {llhd.explicit_init} : !llhd.time
   %c42_fs = moore.constant_time 42 fs
   moore.variable %c42_fs : <!moore.time>
 
