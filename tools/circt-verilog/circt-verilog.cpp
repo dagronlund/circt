@@ -336,7 +336,9 @@ static void populatePasses(PassManager &pm) {
     return;
   LlhdToCorePipelineOptions options;
   options.detectMemories = opts.detectMemories;
-  options.sroa = opts.sroa;
+  // Resolve drivers per aggregate element before ordinary lowering promotes
+  // partial writes to whole-signal drives and extracts aggregate registers.
+  options.sroa = opts.sroa || opts.lowerLLHDFormalToCore;
   populateLlhdToCorePipeline(pm, options);
   if (opts.lowerLLHDFormalToCore)
     pm.addPass(llhd::createLowerLLHDFormalToCorePass());

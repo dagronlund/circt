@@ -6,11 +6,11 @@ hw.module @struct(in %init : !hw.struct<a: i32, b: i32>, in %v1 : i32, in %v2 : 
 
   //      CHECK: [[V0:%.+]] = hw.struct_extract %init["a"] : !hw.struct<a: i32, b: i32>
   // CHECK-NEXT: [[V1:%.+]] = llhd.sig{{ }}
-  // CHECK-SAME: [[V0]]
+  // CHECK-SAME: [[V0]] {llhd.explicit_init}
   // CHECK-NEXT: [[V2:%.+]] = hw.struct_extract %init["b"] : !hw.struct<a: i32, b: i32>
   // CHECK-NEXT: [[V3:%.+]] = llhd.sig{{ }}
-  // CHECK-SAME: [[V2]]
-  %sig = llhd.sig %init : !hw.struct<a: i32, b: i32>
+  // CHECK-SAME: [[V2]] {llhd.explicit_init}
+  %sig = llhd.sig %init {llhd.explicit_init} : !hw.struct<a: i32, b: i32>
 
   // CHECK-NEXT: [[V4:%.+]] = llhd.prb [[V1]]
   // CHECK-NEXT: [[V5:%.+]] = llhd.prb [[V3]]
@@ -46,11 +46,11 @@ hw.module @array(in %init : !hw.array<2xi32>, in %v1 : i32, in %v2 : i32, out ou
 
   //      CHECK: [[V0:%.+]] = hw.array_get %init[%false
   // CHECK-NEXT: [[V1:%.+]] = llhd.sig
-  // CHECK-SAME: [[V0]]
+  // CHECK-SAME: [[V0]] {llhd.unconstrained}
   //      CHECK: [[V2:%.+]] = hw.array_get %init[%true
   // CHECK-NEXT: [[V3:%.+]] = llhd.sig
-  // CHECK-SAME: [[V2]]
-  %sig = llhd.sig %init : !hw.array<2xi32>
+  // CHECK-SAME: [[V2]] {llhd.unconstrained}
+  %sig = llhd.sig %init {llhd.unconstrained} : !hw.array<2xi32>
 
   // CHECK-NEXT: [[V4:%.+]] = llhd.prb [[V1]]
   // CHECK-NEXT: [[V5:%.+]] = llhd.prb [[V3]]

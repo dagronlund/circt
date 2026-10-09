@@ -58,6 +58,21 @@ hw.module @multidriver(in %a: i1, in %b: i1) {
 
 // -----
 
+// Splitting an array must still reject overlapping element drivers.
+hw.module @overlapping_array_drivers(in %a: i1, in %b: i1) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.constant false
+  %init = hw.aggregate_constant [false, false] : !hw.array<2xi1>
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %init {llhd.unconstrained} : !hw.array<2xi1>
+  %elem = llhd.sig.array_get %s[%zero] : !llhd.ref<!hw.array<2xi1>>
+  llhd.drv %elem, %a after %time : i1
+  llhd.drv %elem, %b after %time : i1
+  hw.output
+}
+
+// -----
+
 hw.module @time(in %a: i1) {
   %t = llhd.constant_time <1ns, 0d, 0e>
   %s = llhd.sig %a : i1
