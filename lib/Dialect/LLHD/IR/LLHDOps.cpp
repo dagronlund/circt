@@ -204,6 +204,10 @@ DenseMap<Attribute, MemorySlot> SignalOp::destructure(
   for (auto [index, type] : indices) {
     Value init = getValueAtIndex(builder, getLoc(), getInit(), index, type);
     auto sigOp = SignalOp::create(builder, getLoc(), getNameAttr(), init);
+    // Preserve initialization semantics when splitting aggregate storage.
+    for (StringRef attr : {"llhd.unconstrained", "llhd.explicit_init"})
+      if (auto value = (*this)->getAttr(attr))
+        sigOp->setAttr(attr, value);
     newAllocators.push_back(sigOp);
     slotMap.try_emplace<MemorySlot>(
         IntegerAttr::get(IndexType::get(getContext()), index),

@@ -758,6 +758,13 @@ struct LowerLLHDFormalToCorePass
   LogicalResult lower(ModuleOp module) {
     if (!maxMonitorDepth)
       return module.emitError("max-monitor-depth must be positive");
+    // Independent aggregate elements may have different drivers, including a
+    // mix of combinational and clocked assignments. Split these before checking
+    // driver ownership or promoting partial writes to whole-signal updates.
+    PassManager aggregates(&getContext());
+    aggregates.addNestedPass<hw::HWModuleOp>(createSROA());
+    if (failed(runPipeline(aggregates, module)))
+      return failure();
     if (failed(preflight(module)))
       return failure();
     if (failed(lowerTimeData(module)))
