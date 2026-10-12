@@ -466,9 +466,10 @@ void normalizeArrayDrives(ModuleOp module) {
 /// Ordinary register extraction can pad a partial write with probes of the
 /// untouched signal lanes. After SROA, those lanes appear to have both their
 /// actual driver and a registered copy of themselves. Recover the partial write
-/// when the register is only used to drive split signals, and discard only
-/// exact passthrough lanes with another driver. Reset, preset, symbolic, or
-/// independently observed register state must not be discarded.
+/// when the register is only used to drive split signals, apart from an
+/// optional self-feedback enable mux. Discard only exact passthrough lanes with
+/// another driver. Reset, preset, symbolic, or independently observed register
+/// state must not be discarded.
 void normalizeRegisterDrives(ModuleOp module) {
   SmallVector<seq::FirRegOp> registers;
   module.walk([&](seq::FirRegOp op) { registers.push_back(op); });
@@ -477,9 +478,24 @@ void normalizeRegisterDrives(ModuleOp module) {
         !isa<IntegerType, hw::ArrayType>(reg.getType()) || reg.getReset() ||
         reg.getPresetAttr() || reg.getInnerSymAttr())
       continue;
+    // Ordinary extraction represents an enable as a mux feeding back the
+    // entire register on its hold arm. Analyze padding on the update arm and
+    // retain this mux around each surviving lane's state.
+    Value update = reg.getNext();
+    auto hold = update.getDefiningOp<comb::MuxOp>();
+    if (hold && hold->getBlock() == reg->getBlock() &&
+        (hold.getTrueValue() == reg.getResult() ||
+         hold.getFalseValue() == reg.getResult()) &&
+        hold.getCond() != reg.getResult() && hold.getResult().hasOneUse())
+      update = hold.getTrueValue() == reg.getResult() ? hold.getFalseValue()
+                                                      : hold.getTrueValue();
+    else
+      hold = {};
     SmallVector<Operation *> slices;
     bool supported = true;
     for (auto *user : reg->getUsers()) {
+      if (hold && user == hold.getOperation())
+        continue;
       auto arraySlice = dyn_cast<hw::ArrayGetOp>(user);
       if ((!isa<comb::ExtractOp>(user) &&
            (!arraySlice || !getArrayLaneIndex(arraySlice))) ||
@@ -505,12 +521,12 @@ void normalizeRegisterDrives(ModuleOp module) {
     for (auto *slice : slices) {
       Value next;
       if (auto packedSlice = dyn_cast<comb::ExtractOp>(slice))
-        next = getPackedLane(reg.getNext(), packedSlice.getLowBit(),
+        next = getPackedLane(update, packedSlice.getLowBit(),
                              packedSlice.getType().getIntOrFloatBitWidth());
       else {
         auto arraySlice = cast<hw::ArrayGetOp>(slice);
         next = ArrayLaneProjector(arraySlice, *getArrayLaneIndex(arraySlice))
-                   .project(reg.getNext());
+                   .project(update);
       }
       if (!next)
         continue;
@@ -539,21 +555,34 @@ void normalizeRegisterDrives(ModuleOp module) {
         Value next;
         if (auto packedSlice = dyn_cast<comb::ExtractOp>(slice))
           next = builder.createOrFold<comb::ExtractOp>(
-              slice->getLoc(), reg.getNext(), packedSlice.getLowBit(),
+              slice->getLoc(), update, packedSlice.getLowBit(),
               packedSlice.getType().getIntOrFloatBitWidth());
         else {
           auto arraySlice = cast<hw::ArrayGetOp>(slice);
           next = ArrayLaneProjector(arraySlice, *getArrayLaneIndex(arraySlice),
                                     &builder)
-                     .project(reg.getNext());
+                     .project(update);
         }
         IRMapping mapping;
         mapping.map(reg.getNext(), next);
         auto *narrowed = builder.clone(*reg, mapping);
         narrowed->getResult(0).setType(slice->getResult(0).getType());
+        if (hold) {
+          IRMapping holdMapping;
+          holdMapping.map(update, next);
+          holdMapping.map(reg.getResult(), narrowed->getResult(0));
+          auto *narrowedHold = builder.clone(*hold, holdMapping);
+          narrowedHold->getResult(0).setType(slice->getResult(0).getType());
+          cast<seq::FirRegOp>(narrowed).getNextMutable().assign(
+              narrowedHold->getResult(0));
+        }
         slice->getResult(0).replaceAllUsesWith(narrowed->getResult(0));
       }
       slice->erase();
+    }
+    if (hold) {
+      reg.getNextMutable().assign(update);
+      hold.erase();
     }
     reg.erase();
   }
