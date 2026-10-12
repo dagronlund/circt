@@ -340,6 +340,108 @@ LogicalResult unwrapPropertyProcess(ProcessOp process) {
   return success();
 }
 
+/// Find an unchanged packed lane through concatenations and nested extracts.
+/// Only return an existing value covering the entire requested interval.
+Value getPackedLane(Value value, unsigned low, unsigned width,
+                    unsigned depth = 0) {
+  if (depth == 64)
+    return {};
+  if (low == 0 && value.getType().isSignlessInteger(width))
+    return value;
+  if (auto extract = value.getDefiningOp<comb::ExtractOp>())
+    return getPackedLane(extract.getInput(), low + extract.getLowBit(), width,
+                         depth + 1);
+  if (auto concat = value.getDefiningOp<comb::ConcatOp>()) {
+    unsigned offset = 0;
+    for (auto input : llvm::reverse(concat.getInputs())) {
+      unsigned inputWidth = input.getType().getIntOrFloatBitWidth();
+      if (low >= offset && low + width <= offset + inputWidth)
+        return getPackedLane(input, low - offset, width, depth + 1);
+      offset += inputWidth;
+    }
+  }
+  return {};
+}
+
+/// Ordinary register extraction can pad a partial write with probes of the
+/// untouched signal lanes. After SROA, those lanes appear to have both their
+/// actual driver and a registered copy of themselves. Recover the partial write
+/// when the register is only used to drive split signals, and discard only
+/// exact passthrough lanes with another driver. Reset, preset, symbolic, or
+/// independently observed register state must not be discarded.
+void normalizePackedRegisterDrives(ModuleOp module) {
+  SmallVector<seq::FirRegOp> registers;
+  module.walk([&](seq::FirRegOp op) { registers.push_back(op); });
+  for (auto reg : registers) {
+    if (!isa<hw::HWModuleOp>(reg->getParentOp()) ||
+        !isa<IntegerType>(reg.getType()) || reg.getReset() ||
+        reg.getPresetAttr() || reg.getInnerSymAttr())
+      continue;
+    SmallVector<comb::ExtractOp> slices;
+    bool supported = true;
+    for (auto *user : reg->getUsers()) {
+      auto slice = dyn_cast<comb::ExtractOp>(user);
+      if (!slice || slice->getBlock() != reg->getBlock() ||
+          !llvm::all_of(slice->getUsers(), [&](Operation *user) {
+            auto drive = dyn_cast<DriveOp>(user);
+            TimeAttr time;
+            return drive && drive.getValue() == slice.getResult() &&
+                   drive->getBlock() == reg->getBlock() && !drive.getEnable() &&
+                   drive.getSignal().getDefiningOp<SignalOp>() &&
+                   matchPattern(drive.getTime(), m_Constant(&time)) &&
+                   time.getTime() == 0 && time.getDelta() <= 1 &&
+                   time.getEpsilon() <= 1;
+          })) {
+        supported = false;
+        break;
+      }
+      slices.push_back(slice);
+    }
+    if (!supported)
+      continue;
+    SmallVector<DriveOp> padding;
+    for (auto slice : slices) {
+      auto next = getPackedLane(reg.getNext(), slice.getLowBit(),
+                                slice.getType().getIntOrFloatBitWidth());
+      if (!next)
+        continue;
+      auto probe = next.getDefiningOp<ProbeOp>();
+      if (!probe)
+        continue;
+      for (auto *user : slice->getUsers()) {
+        auto drive = cast<DriveOp>(user);
+        if (probe.getSignal() == drive.getSignal() &&
+            llvm::any_of(drive.getSignal().getUsers(), [&](Operation *other) {
+              auto otherDrive = dyn_cast<DriveOp>(other);
+              return otherDrive && otherDrive != drive &&
+                     otherDrive.getSignal() == drive.getSignal() &&
+                     otherDrive.getValue() != slice.getResult();
+            }))
+          padding.push_back(drive);
+      }
+    }
+    if (padding.empty())
+      continue;
+    for (auto drive : padding)
+      drive.erase();
+    for (auto slice : slices) {
+      if (!slice->use_empty()) {
+        OpBuilder builder(slice);
+        Value next = builder.createOrFold<comb::ExtractOp>(
+            slice.getLoc(), reg.getNext(), slice.getLowBit(),
+            slice.getType().getIntOrFloatBitWidth());
+        IRMapping mapping;
+        mapping.map(reg.getNext(), next);
+        auto *narrowed = builder.clone(*reg, mapping);
+        narrowed->getResult(0).setType(slice.getType());
+        slice.replaceAllUsesWith(narrowed->getResult(0));
+      }
+      slice.erase();
+    }
+    reg.erase();
+  }
+}
+
 LogicalResult preflight(ModuleOp module, bool normalized = false,
                         bool allowUndriven = false) {
   auto result = module.walk([&](Operation *op) -> WalkResult {
@@ -774,7 +876,10 @@ struct LowerLLHDFormalToCorePass
     // driver ownership or promoting partial writes to whole-signal updates.
     PassManager aggregates(&getContext());
     aggregates.addNestedPass<hw::HWModuleOp>(createSROA());
-    if (failed(runPipeline(aggregates, module)))
+    if (failed(runPipeline(aggregates, module)) || failed(cleanup(module)))
+      return failure();
+    normalizePackedRegisterDrives(module);
+    if (failed(cleanup(module)))
       return failure();
     if (failed(preflight(module, false, true)))
       return failure();
