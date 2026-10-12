@@ -75,3 +75,16 @@ module packed_slice_instance(input logic clk, input logic [3:0] d,
   always_comb words[0][7:4] = '0;
   always_comb q = words[0];
 endmodule
+
+// The undriven upper nibble only appears in the always_comb sensitivity list.
+// Formal lowering must discard it after lowering the combinational process.
+// CHECK-LABEL: hw.module @partial_packed_slice_instance(in %clk : i1, in %d : i4
+// CHECK-NOT: seq.
+// CHECK: [[Q:%.+]] = hw.instance "inst" @packed_nibble(clk: %clk: i1, d: %d: i4) -> (q: i4)
+// CHECK-NEXT: hw.output [[Q]] : i4
+module partial_packed_slice_instance(input logic clk, input logic [3:0] d,
+                                    output logic [3:0] q);
+  logic [0:0][7:0] words;
+  packed_nibble inst(.clk, .d, .q(words[0][3:0]));
+  always_comb q = words[0][3:0];
+endmodule

@@ -340,7 +340,8 @@ LogicalResult unwrapPropertyProcess(ProcessOp process) {
   return success();
 }
 
-LogicalResult preflight(ModuleOp module, bool normalized = false) {
+LogicalResult preflight(ModuleOp module, bool normalized = false,
+                        bool allowUndriven = false) {
   auto result = module.walk([&](Operation *op) -> WalkResult {
     auto dialect = op->getName().getDialectNamespace();
     if (dialect != "builtin" && dialect != "hw" && dialect != "seq" &&
@@ -402,7 +403,12 @@ LogicalResult preflight(ModuleOp module, bool normalized = false) {
           return WalkResult::interrupt();
         }
       }
-      if (drivers.size() != 1) {
+      // Module-level undriven slices may only feed a process sensitivity list.
+      // Defer their check until process lowering and cleanup remove those uses.
+      // Check local signals before Mem2Reg can fold their initializer.
+      if (drivers.size() > 1 ||
+          (drivers.empty() &&
+           (!allowUndriven || !isa<hw::HWModuleOp>(signal->getParentOp())))) {
         signal.emitError("signal must have exactly one resolved driver");
         return WalkResult::interrupt();
       }
@@ -765,7 +771,7 @@ struct LowerLLHDFormalToCorePass
     aggregates.addNestedPass<hw::HWModuleOp>(createSROA());
     if (failed(runPipeline(aggregates, module)))
       return failure();
-    if (failed(preflight(module)))
+    if (failed(preflight(module, false, true)))
       return failure();
     if (failed(lowerTimeData(module)))
       return failure();
@@ -774,7 +780,7 @@ struct LowerLLHDFormalToCorePass
     if (failed(runPipeline(storage, module)))
       return failure();
     hoistFormalSignals(module);
-    if (failed(preflight(module, true)))
+    if (failed(preflight(module, true, true)))
       return failure();
     SmallVector<ProcessOp> processes;
     module.walk([&](ProcessOp op) { processes.push_back(op); });
@@ -817,6 +823,10 @@ struct LowerLLHDFormalToCorePass
         block.front().moveBefore(op);
       op.erase();
     }
+    // Sensitivity-only probes of undriven aggregate slices are now dead. Reject
+    // any remaining undriven storage before signal promotion can use its init.
+    if (failed(cleanup(module)) || failed(preflight(module, true)))
+      return failure();
     PassManager signals(&getContext());
     signals.addNestedPass<hw::HWModuleOp>(createSig2Reg());
     if (failed(runPipeline(signals, module)))
