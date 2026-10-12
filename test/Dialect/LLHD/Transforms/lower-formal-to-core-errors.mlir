@@ -21,6 +21,79 @@ hw.module @loop(in %a: i1) {
 
 // -----
 
+// The mathematical trip count is two, but the i2 counter wraps from two to
+// zero and never exits. Formal normalization must leave this loop unsupported.
+hw.module @wrapping_counter(in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %step = hw.constant 2 : i2
+  %high = hw.constant 0 : i30
+  %bound = hw.constant 3 : i32
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero : i2)
+  ^header(%i: i2):
+    %wide = comb.concat %high, %i : i30, i2
+    %continue = comb.icmp ult %wide, %bound : i32
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next = comb.add %i, %step : i2
+    cf.br ^header(%next : i2)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
+
+// -----
+
+// A widened comparison against four cannot be narrowed to an i2 counter.
+hw.module @unreachable_counter_bound(in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %step = hw.constant 1 : i2
+  %high = hw.constant 0 : i30
+  %bound = hw.constant 4 : i32
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero : i2)
+  ^header(%i: i2):
+    %wide = comb.concat %high, %i : i30, i2
+    %continue = comb.icmp ult %wide, %bound : i32
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next = comb.add %i, %step : i2
+    cf.br ^header(%next : i2)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
+
+// -----
+
+// Even a statically bounded loop cannot be expanded across sampling waits.
+hw.module @suspending_loop(in %clk: i1) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  // expected-error @+1 {{unsupported formal process}}
+  llhd.process {
+    cf.br ^header(%zero : i2)
+  ^header(%i: i2):
+    %continue = comb.icmp ult %i, %bound : i2
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    llhd.wait (%clk : i1), ^latch
+  ^latch:
+    %next = comb.add %i, %one : i2
+    cf.br ^header(%next : i2)
+  ^exit:
+    llhd.halt
+  }
+  hw.output
+}
+
+// -----
+
 hw.module @unbounded(in %clk: i1, in %a: i1) {
   // expected-error @+1 {{unbounded or variable temporal sequence is unsupported}}
   %p = ltl.delay %a, 1 : i1

@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "FormalUtils.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
@@ -97,7 +98,8 @@ static void cloneBlocks(ArrayRef<Block *> blocks, Region &region,
 namespace {
 /// A data structure tracking information on a single loop.
 struct Loop {
-  Loop(unsigned loopId, CFGLoop &cfgLoop) : loopId(loopId), cfgLoop(cfgLoop) {}
+  Loop(unsigned loopId, CFGLoop &cfgLoop, bool formal)
+      : loopId(loopId), cfgLoop(cfgLoop), formal(formal) {}
   bool failMatch(const Twine &msg) const;
   bool match();
   void unroll(CFGLoopInfo &cfgLoopInfo);
@@ -106,6 +108,7 @@ struct Loop {
   unsigned loopId;
   /// Loop analysis information about this specific loop.
   CFGLoop &cfgLoop;
+  bool formal;
   /// The CFG edge exiting the loop.
   BlockOperand *exitEdge = nullptr;
   /// The SSA value holding the exit condition.
@@ -148,6 +151,13 @@ bool Loop::failMatch(const Twine &msg) const {
 /// Check that the loop matches the specific pattern we understand, and extract
 /// the loop condition and induction variable.
 bool Loop::match() {
+  // Formal process loops must execute entirely within one sampling step.
+  if (formal)
+    for (auto *block : cfgLoop.getBlocks())
+      for (auto &op : *block)
+        if (isa<WaitOp, HaltOp>(op))
+          return failMatch("loop suspends execution");
+
   // Ensure that there is a unique exit point and condition for the loop.
   SmallVector<BlockOperand *> exits;
   for (auto *block : cfgLoop.getBlocks())
@@ -174,6 +184,20 @@ bool Loop::match() {
     indVar = icmpOp.getLhs();
     predicate = icmpOp.getPredicate();
     endBound = boundAttr.getValue();
+    // SystemVerilog widens small unsigned loop counters to the width of an
+    // unsized bound. Look through that extension only when the bound fits the
+    // counter, so the comparison has exactly the same meaning at either width.
+    if (formal && predicate == comb::ICmpPredicate::ult)
+      if (auto concat = indVar.getDefiningOp<comb::ConcatOp>();
+          concat && concat.getNumOperands() == 2 &&
+          matchPattern(concat.getOperand(0), m_Zero())) {
+        auto counter = concat.getOperand(1);
+        unsigned width = counter.getType().getIntOrFloatBitWidth();
+        if (endBound.getActiveBits() <= width) {
+          indVar = counter;
+          endBound = endBound.trunc(width);
+        }
+      }
   } else {
     return failMatch("unsupported exit condition");
   }
@@ -223,6 +247,41 @@ bool Loop::match() {
     indVarIncrement = incAttr.getValue();
   } else {
     return failMatch("unsupported increment");
+  }
+
+  // Count formal iterations at the counter's actual width. Mathematical range
+  // arithmetic can incorrectly terminate loops whose fixed-width counter wraps.
+  if (formal) {
+    auto value = beginBound;
+    for (tripCount = 0; tripCount < 1024; ++tripCount) {
+      bool continues;
+      switch (predicate) {
+      case comb::ICmpPredicate::ult:
+        continues = value.ult(endBound);
+        break;
+      case comb::ICmpPredicate::slt:
+        continues = value.slt(endBound);
+        break;
+      case comb::ICmpPredicate::sgt:
+        continues = value.sgt(endBound);
+        break;
+      case comb::ICmpPredicate::eq:
+        continues = value == endBound;
+        break;
+      default:
+        return failMatch("unsupported loop bounds");
+      }
+      if (!continues)
+        return true;
+      bool overflow;
+      value = predicate == comb::ICmpPredicate::ult ||
+                      predicate == comb::ICmpPredicate::eq
+                  ? value.uadd_ov(indVarIncrement, overflow)
+                  : value.sadd_ov(indVarIncrement, overflow);
+      if (overflow)
+        return failMatch("induction variable wraps");
+    }
+    return failMatch("unsupported loop bounds");
   }
 
   std::optional<unsigned> range;
@@ -418,37 +477,43 @@ void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
 //===----------------------------------------------------------------------===//
 
 namespace {
+struct LoopUnroller {
+  explicit LoopUnroller(bool formal = false) : formal(formal) {}
+  void run(Region &region);
+  bool unrollLoops(Region &region);
+  bool formal;
+};
+
 struct UnrollLoopsPass
     : public llhd::impl::UnrollLoopsPassBase<UnrollLoopsPass> {
   void runOnOperation() override;
-  void runOnOperation(CombinationalOp op);
-  bool unrollLoops(CombinationalOp op);
 };
 } // namespace
 
 void UnrollLoopsPass::runOnOperation() {
   for (auto op : getOperation().getOps<CombinationalOp>())
-    runOnOperation(op);
+    LoopUnroller().run(op.getBody());
 }
 
-void UnrollLoopsPass::runOnOperation(CombinationalOp op) {
+void LoopUnroller::run(Region &region) {
   // Unrolling a loop may open up opportunities to unroll its nested loops.
   // Iterate until all possible loops are unrolled or the limit is reached.
   for (unsigned i = 0; i < 16; ++i)
-    if (!unrollLoops(op))
+    if (!unrollLoops(region))
       break;
 }
 
-bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
+bool LoopUnroller::unrollLoops(Region &region) {
   // There's nothing to do if we only have a single block. MLIR even refuses to
   // compute a dominator tree in that case.
-  if (op.getBody().hasOneBlock())
+  if (region.empty() || region.hasOneBlock())
     return false;
 
   // Find the loops.
-  LLVM_DEBUG(llvm::dbgs() << "Unrolling loops in " << op.getLoc() << "\n");
-  DominanceInfo domInfo(op);
-  CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&op.getBody()));
+  LLVM_DEBUG(llvm::dbgs() << "Unrolling loops in "
+                          << region.getParentOp()->getLoc() << "\n");
+  DominanceInfo domInfo(region.getParentOp());
+  CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&region));
 
   // We only support simple loops where there is a single back-edge to the
   // header, and the latch block has a back-edge to a single header. Create a
@@ -469,7 +534,7 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
       cfgLoop->print(llvm::dbgs(), false, false);
       llvm::dbgs() << "\n";
     });
-    Loop loop(loops.size(), *cfgLoop);
+    Loop loop(loops.size(), *cfgLoop, formal);
 
     // Ensure that the header block is only a header for the current loop. This
     // simplifies unrolling.
@@ -535,4 +600,11 @@ bool UnrollLoopsPass::unrollLoops(CombinationalOp op) {
     loop.unroll(cfgLoopInfo);
 
   return retry;
+}
+
+void circt::llhd::unrollFormalLoops(Operation *op) {
+  op->walk([](Operation *nested) {
+    if (isa<ProcessOp, CombinationalOp>(nested))
+      LoopUnroller(true).run(nested->getRegion(0));
+  });
 }
