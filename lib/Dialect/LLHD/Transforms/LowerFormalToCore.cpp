@@ -764,6 +764,11 @@ struct LowerLLHDFormalToCorePass
   LogicalResult lower(ModuleOp module) {
     if (!maxMonitorDepth)
       return module.emitError("max-monitor-depth must be positive");
+    // Resolve static procedural loops before SROA and driver validation. Their
+    // induction variables may select independently driven packed slices.
+    unrollFormalLoops(module);
+    if (failed(cleanup(module)))
+      return failure();
     // Independent aggregate elements may have different drivers, including a
     // mix of combinational and clocked assignments. Split these before checking
     // driver ownership or promoting partial writes to whole-signal updates.
@@ -803,6 +808,9 @@ struct LowerLLHDFormalToCorePass
     });
     if (remaining.wasInterrupted())
       return failure();
+    // Mem2Reg and register extraction may expose additional combinational
+    // loops.
+    unrollFormalLoops(module);
     // Remove unreachable edge-specialization blocks before CFG predication.
     if (failed(cleanup(module)))
       return failure();
