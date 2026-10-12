@@ -73,6 +73,46 @@ hw.module @overlapping_array_drivers(in %a: i1, in %b: i1) {
 
 // -----
 
+// An observable undriven signal must not become its scheduling initializer.
+hw.module @undriven_output(out y: i4) {
+  %zero = hw.constant 0 : i4
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %zero {llhd.unconstrained} : i4
+  %y = llhd.prb %s : i4
+  hw.output %y : i4
+}
+
+// -----
+
+// Splitting packed storage must still reject an observable undriven slice.
+hw.module @undriven_packed_slice(in %a: i4, out y: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.constant 0 : i8
+  %low = hw.constant 0 : i3
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %zero {llhd.unconstrained} : i8
+  %slice = llhd.sig.extract %s from %low : <i8> -> <i4>
+  llhd.drv %slice, %a after %time : i4
+  %y = llhd.prb %s : i8
+  hw.output %y : i8
+}
+
+// -----
+
+// Check local storage before Mem2Reg can replace probes with its initializer.
+hw.module @local_undriven_output(out y: i4) {
+  %zero = hw.constant 0 : i4
+  %y = llhd.combinational -> i4 {
+    // expected-error @+1 {{signal must have exactly one resolved driver}}
+    %s = llhd.sig %zero {llhd.unconstrained} : i4
+    %value = llhd.prb %s : i4
+    llhd.yield %value : i4
+  }
+  hw.output %y : i4
+}
+
+// -----
+
 hw.module @time(in %a: i1) {
   %t = llhd.constant_time <1ns, 0d, 0e>
   %s = llhd.sig %a : i1
