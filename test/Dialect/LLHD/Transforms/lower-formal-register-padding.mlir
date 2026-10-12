@@ -20,3 +20,28 @@ hw.module @padding(in %clk: !seq.clock, in %low: i3, in %high: i5, out q: i5) {
   %q = comb.extract %value from 3 : (i8) -> i5
   hw.output %q : i5
 }
+
+// The unchanged element is common to both mux arms. Project the written array
+// element through the mux, preserving its twoState flag and arbitrary attrs.
+// CHECK-LABEL: hw.module @array_padding
+// CHECK: [[NEXT:%.+]] = comb.mux bin %sel, %a, %b {test.tag = "mux"} : i3
+// CHECK: [[Q:%.+]] = seq.firreg [[NEXT]] clock %clk {test.tag = "state"} : i3
+// CHECK-NEXT: hw.output [[Q]] : i3
+hw.module @array_padding(in %clk: !seq.clock, in %sel: i1, in %low: i3, in %a: i3, in %b: i3, out q: i3) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [0 : i3, 0 : i3] : !hw.array<2xi3>
+  %false = hw.constant false
+  %true = hw.constant true
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.array<2xi3>
+  %low_ref = llhd.sig.array_get %s[%false] : !llhd.ref<!hw.array<2xi3>>
+  llhd.drv %low_ref, %low after %time : i3
+  %value = llhd.prb %s : !hw.array<2xi3>
+  %old_low = hw.array_get %value[%false] : !hw.array<2xi3>, i1
+  %a_next = hw.array_create %a, %old_low : i3
+  %b_next = hw.array_inject %value[%true], %b : !hw.array<2xi3>, i1
+  %next = comb.mux bin %sel, %a_next, %b_next {test.tag = "mux"} : !hw.array<2xi3>
+  %reg = seq.firreg %next clock %clk {test.tag = "state"} : !hw.array<2xi3>
+  llhd.drv %s, %reg after %time : !hw.array<2xi3>
+  %q = hw.array_get %value[%true] : !hw.array<2xi3>, i1
+  hw.output %q : i3
+}

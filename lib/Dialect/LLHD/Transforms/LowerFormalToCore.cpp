@@ -363,29 +363,96 @@ Value getPackedLane(Value value, unsigned low, unsigned width,
   return {};
 }
 
+/// Project a constant array element through aggregate construction and muxes.
+/// Without a builder, only return an existing value common to every mux arm.
+/// Memoize shared mux trees and bound traversal of graph-region cycles.
+struct ArrayLaneProjector {
+  ArrayLaneProjector(hw::ArrayGetOp slice, uint64_t index,
+                     OpBuilder *builder = nullptr)
+      : slice(slice), index(index), builder(builder) {}
+
+  Value project(Value input, unsigned depth = 0) {
+    if (auto it = cache.find(input); it != cache.end())
+      return it->second;
+    Value value;
+    if (depth < 64) {
+      if (auto create = input.getDefiningOp<hw::ArrayCreateOp>()) {
+        auto elements = create.getInputs();
+        if (index < elements.size())
+          value = elements[elements.size() - index - 1];
+      } else if (auto inject = input.getDefiningOp<hw::ArrayInjectOp>()) {
+        APInt injectedIndex;
+        if (matchPattern(inject.getIndex(), m_ConstantInt(&injectedIndex)) &&
+            injectedIndex.getActiveBits() <= 64)
+          value = injectedIndex.getZExtValue() == index
+                      ? inject.getElement()
+                      : project(inject.getInput(), depth + 1);
+      } else if (auto mux = input.getDefiningOp<comb::MuxOp>()) {
+        Value trueValue = project(mux.getTrueValue(), depth + 1);
+        Value falseValue = project(mux.getFalseValue(), depth + 1);
+        if (trueValue && trueValue == falseValue)
+          value = trueValue;
+        else if (builder && trueValue && falseValue) {
+          IRMapping mapping;
+          mapping.map(mux.getTrueValue(), trueValue);
+          mapping.map(mux.getFalseValue(), falseValue);
+          auto *projected = builder->clone(*mux, mapping);
+          projected->getResult(0).setType(slice.getType());
+          value = projected->getResult(0);
+        }
+      }
+    }
+    if (!value && builder) {
+      IRMapping mapping;
+      mapping.map(slice.getInput(), input);
+      value = builder->clone(*slice, mapping)->getResult(0);
+    }
+    cache[input] = value;
+    return value;
+  }
+
+  hw::ArrayGetOp slice;
+  uint64_t index;
+  OpBuilder *builder;
+  DenseMap<Value, Value> cache;
+};
+
+std::optional<uint64_t> getArrayLaneIndex(hw::ArrayGetOp slice) {
+  APInt index;
+  if (!matchPattern(slice.getIndex(), m_ConstantInt(&index)) ||
+      index.getActiveBits() > 64)
+    return {};
+  uint64_t value = index.getZExtValue();
+  if (value >= cast<hw::ArrayType>(slice.getInput().getType()).getNumElements())
+    return {};
+  return value;
+}
+
 /// Ordinary register extraction can pad a partial write with probes of the
 /// untouched signal lanes. After SROA, those lanes appear to have both their
 /// actual driver and a registered copy of themselves. Recover the partial write
 /// when the register is only used to drive split signals, and discard only
 /// exact passthrough lanes with another driver. Reset, preset, symbolic, or
 /// independently observed register state must not be discarded.
-void normalizePackedRegisterDrives(ModuleOp module) {
+void normalizeRegisterDrives(ModuleOp module) {
   SmallVector<seq::FirRegOp> registers;
   module.walk([&](seq::FirRegOp op) { registers.push_back(op); });
   for (auto reg : registers) {
     if (!isa<hw::HWModuleOp>(reg->getParentOp()) ||
-        !isa<IntegerType>(reg.getType()) || reg.getReset() ||
+        !isa<IntegerType, hw::ArrayType>(reg.getType()) || reg.getReset() ||
         reg.getPresetAttr() || reg.getInnerSymAttr())
       continue;
-    SmallVector<comb::ExtractOp> slices;
+    SmallVector<Operation *> slices;
     bool supported = true;
     for (auto *user : reg->getUsers()) {
-      auto slice = dyn_cast<comb::ExtractOp>(user);
-      if (!slice || slice->getBlock() != reg->getBlock() ||
-          !llvm::all_of(slice->getUsers(), [&](Operation *user) {
-            auto drive = dyn_cast<DriveOp>(user);
+      auto arraySlice = dyn_cast<hw::ArrayGetOp>(user);
+      if ((!isa<comb::ExtractOp>(user) &&
+           (!arraySlice || !getArrayLaneIndex(arraySlice))) ||
+          user->getBlock() != reg->getBlock() ||
+          !llvm::all_of(user->getUsers(), [&](Operation *sliceUser) {
+            auto drive = dyn_cast<DriveOp>(sliceUser);
             TimeAttr time;
-            return drive && drive.getValue() == slice.getResult() &&
+            return drive && drive.getValue() == user->getResult(0) &&
                    drive->getBlock() == reg->getBlock() && !drive.getEnable() &&
                    drive.getSignal().getDefiningOp<SignalOp>() &&
                    matchPattern(drive.getTime(), m_Constant(&time)) &&
@@ -395,14 +462,21 @@ void normalizePackedRegisterDrives(ModuleOp module) {
         supported = false;
         break;
       }
-      slices.push_back(slice);
+      slices.push_back(user);
     }
     if (!supported)
       continue;
     SmallVector<DriveOp> padding;
-    for (auto slice : slices) {
-      auto next = getPackedLane(reg.getNext(), slice.getLowBit(),
-                                slice.getType().getIntOrFloatBitWidth());
+    for (auto *slice : slices) {
+      Value next;
+      if (auto packedSlice = dyn_cast<comb::ExtractOp>(slice))
+        next = getPackedLane(reg.getNext(), packedSlice.getLowBit(),
+                             packedSlice.getType().getIntOrFloatBitWidth());
+      else {
+        auto arraySlice = cast<hw::ArrayGetOp>(slice);
+        next = ArrayLaneProjector(arraySlice, *getArrayLaneIndex(arraySlice))
+                   .project(reg.getNext());
+      }
       if (!next)
         continue;
       auto probe = next.getDefiningOp<ProbeOp>();
@@ -415,7 +489,7 @@ void normalizePackedRegisterDrives(ModuleOp module) {
               auto otherDrive = dyn_cast<DriveOp>(other);
               return otherDrive && otherDrive != drive &&
                      otherDrive.getSignal() == drive.getSignal() &&
-                     otherDrive.getValue() != slice.getResult();
+                     otherDrive.getValue() != slice->getResult(0);
             }))
           padding.push_back(drive);
       }
@@ -424,19 +498,27 @@ void normalizePackedRegisterDrives(ModuleOp module) {
       continue;
     for (auto drive : padding)
       drive.erase();
-    for (auto slice : slices) {
+    for (auto *slice : slices) {
       if (!slice->use_empty()) {
         OpBuilder builder(slice);
-        Value next = builder.createOrFold<comb::ExtractOp>(
-            slice.getLoc(), reg.getNext(), slice.getLowBit(),
-            slice.getType().getIntOrFloatBitWidth());
+        Value next;
+        if (auto packedSlice = dyn_cast<comb::ExtractOp>(slice))
+          next = builder.createOrFold<comb::ExtractOp>(
+              slice->getLoc(), reg.getNext(), packedSlice.getLowBit(),
+              packedSlice.getType().getIntOrFloatBitWidth());
+        else {
+          auto arraySlice = cast<hw::ArrayGetOp>(slice);
+          next = ArrayLaneProjector(arraySlice, *getArrayLaneIndex(arraySlice),
+                                    &builder)
+                     .project(reg.getNext());
+        }
         IRMapping mapping;
         mapping.map(reg.getNext(), next);
         auto *narrowed = builder.clone(*reg, mapping);
-        narrowed->getResult(0).setType(slice.getType());
-        slice.replaceAllUsesWith(narrowed->getResult(0));
+        narrowed->getResult(0).setType(slice->getResult(0).getType());
+        slice->getResult(0).replaceAllUsesWith(narrowed->getResult(0));
       }
-      slice.erase();
+      slice->erase();
     }
     reg.erase();
   }
@@ -878,7 +960,7 @@ struct LowerLLHDFormalToCorePass
     aggregates.addNestedPass<hw::HWModuleOp>(createSROA());
     if (failed(runPipeline(aggregates, module)) || failed(cleanup(module)))
       return failure();
-    normalizePackedRegisterDrives(module);
+    normalizeRegisterDrives(module);
     if (failed(cleanup(module)))
       return failure();
     if (failed(preflight(module, false, true)))
