@@ -428,6 +428,41 @@ std::optional<uint64_t> getArrayLaneIndex(hw::ArrayGetOp slice) {
   return value;
 }
 
+/// Mem2Reg in the ordinary frontend pipeline can expand a partial array drive
+/// into an injection into a probe of the same signal. Recover the static target
+/// before SROA, even when dynamic reads require probing the whole array.
+void normalizeArrayDrives(ModuleOp module) {
+  SmallVector<DriveOp> drives;
+  module.walk([&](DriveOp op) { drives.push_back(op); });
+  for (auto drive : drives) {
+    if (!isa<hw::HWModuleOp>(drive->getParentOp()))
+      continue;
+    auto inject = drive.getValue().getDefiningOp<hw::ArrayInjectOp>();
+    if (!inject)
+      continue;
+    auto probe = inject.getInput().getDefiningOp<ProbeOp>();
+    if (!probe || probe.getSignal() != drive.getSignal())
+      continue;
+    APInt index;
+    if (!matchPattern(inject.getIndex(), m_ConstantInt(&index)) ||
+        index.getActiveBits() > 64 ||
+        index.getZExtValue() >=
+            cast<hw::ArrayType>(inject.getInput().getType()).getNumElements())
+      continue;
+
+    OpBuilder builder(drive);
+    auto target = SigArrayGetOp::create(builder, drive.getLoc(),
+                                        drive.getSignal(), inject.getIndex());
+    IRMapping mapping;
+    mapping.map(drive.getSignal(), target.getResult());
+    mapping.map(drive.getValue(), inject.getElement());
+    // Retain the drive's delay, enable, and attributes. Only the statically
+    // unchanged elements are removed from its target.
+    builder.clone(*drive, mapping);
+    drive.erase();
+  }
+}
+
 /// Ordinary register extraction can pad a partial write with probes of the
 /// untouched signal lanes. After SROA, those lanes appear to have both their
 /// actual driver and a registered copy of themselves. Recover the partial write
@@ -953,6 +988,7 @@ struct LowerLLHDFormalToCorePass
     unrollFormalLoops(module);
     if (failed(cleanup(module)))
       return failure();
+    normalizeArrayDrives(module);
     // Independent aggregate elements may have different drivers, including a
     // mix of combinational and clocked assignments. Split these before checking
     // driver ownership or promoting partial writes to whole-signal updates.
