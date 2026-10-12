@@ -109,3 +109,42 @@ hw.module @reset_array_element(in %clk: !seq.clock, in %rst: i1, in %a: i1, in %
   llhd.drv %s, %reg after %time : !hw.array<2xi1>
   hw.output
 }
+
+// -----
+
+// An enabled write to the independently driven element is still an overlap.
+hw.module @changed_enabled_array(in %clk: !seq.clock, in %en: i1, in %a: i3, in %b: i3) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [0 : i3, 0 : i3] : !hw.array<2xi3>
+  %false = hw.constant false
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.array<2xi3>
+  %low = llhd.sig.array_get %s[%false] : !llhd.ref<!hw.array<2xi3>>
+  llhd.drv %low, %a after %time : i3
+  %value = llhd.prb %s : !hw.array<2xi3>
+  %update = hw.array_inject %value[%false], %b : !hw.array<2xi3>, i1
+  %next = comb.mux bin %en, %update, %reg : !hw.array<2xi3>
+  %reg = seq.firreg %next clock %clk : !hw.array<2xi3>
+  llhd.drv %s, %reg after %time : !hw.array<2xi3>
+  hw.output
+}
+
+// -----
+
+// The hold mux cannot be discarded when its aggregate value is also observed.
+hw.module @observed_enabled_next(in %clk: !seq.clock, in %en: i1, in %a: i3, in %b: i3, out next: !hw.array<2xi3>) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [0 : i3, 0 : i3] : !hw.array<2xi3>
+  %false = hw.constant false
+  %true = hw.constant true
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.array<2xi3>
+  %low = llhd.sig.array_get %s[%false] : !llhd.ref<!hw.array<2xi3>>
+  llhd.drv %low, %a after %time : i3
+  %value = llhd.prb %s : !hw.array<2xi3>
+  %update = hw.array_inject %value[%true], %b : !hw.array<2xi3>, i1
+  %next = comb.mux bin %en, %update, %reg : !hw.array<2xi3>
+  %reg = seq.firreg %next clock %clk : !hw.array<2xi3>
+  llhd.drv %s, %reg after %time : !hw.array<2xi3>
+  hw.output %next : !hw.array<2xi3>
+}
