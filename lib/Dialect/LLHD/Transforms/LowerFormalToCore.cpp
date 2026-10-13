@@ -340,6 +340,156 @@ LogicalResult unwrapPropertyProcess(ProcessOp process) {
   return success();
 }
 
+/// Evaluate a startup expression using the declaration initializer, rather than
+/// the signal's eventual register value. Only constant integer expressions and
+/// probes of this signal are supported; do not sample runtime inputs or guess
+/// an execution order between independent startup processes.
+struct InitialValueEvaluator {
+  InitialValueEvaluator(SignalOp signal, IntegerAttr initial)
+      : signal(signal), initial(initial) {}
+
+  IntegerAttr evaluate(Value value, unsigned depth = 0) {
+    if (auto it = cache.find(value); it != cache.end())
+      return it->second;
+    if (depth == 64 || !active.insert(value).second)
+      return {};
+    auto done = llvm::scope_exit([&] { active.erase(value); });
+    IntegerAttr result;
+    if (matchPattern(value, m_Constant(&result)))
+      return result;
+    if (auto probe = value.getDefiningOp<ProbeOp>()) {
+      if (probe.getSignal() == signal.getResult())
+        result = initial;
+    } else if (auto *op = value.getDefiningOp();
+               op && isMemoryEffectFree(op) && !op->getNumRegions() &&
+               op->getNumResults() == 1 && isa<IntegerType>(value.getType()) &&
+               (op->getName().getDialectNamespace() == "comb" ||
+                op->getName().getDialectNamespace() == "hw" ||
+                op->getName().getDialectNamespace() == "arith")) {
+      SmallVector<Attribute> operands;
+      for (auto input : op->getOperands()) {
+        auto constant = evaluate(input, depth + 1);
+        if (!constant)
+          return {};
+        operands.push_back(constant);
+      }
+      // Fold a clone because folding may modify operands or attributes in
+      // place. The evaluated constants need not be the runtime operands.
+      OwningOpRef<Operation *> copy(op->clone());
+      SmallVector<OpFoldResult> folded;
+      if (succeeded(copy->fold(operands, folded)) && folded.size() == 1) {
+        if (auto attr = dyn_cast<Attribute>(folded.front()))
+          result = dyn_cast<IntegerAttr>(attr);
+        else if (auto foldedValue = dyn_cast<Value>(folded.front()))
+          result = evaluate(foldedValue, depth + 1);
+      }
+    }
+    cache[value] = result;
+    return result;
+  }
+
+  SignalOp signal;
+  IntegerAttr initial;
+  DenseMap<Value, IntegerAttr> cache;
+  DenseSet<Value> active;
+};
+
+/// A single constant blocking startup assignment refines a scalar declaration
+/// initializer. Recognize both raw processes and the result/drive pair left by
+/// ordinary Mem2Reg. Require exactly one other, clocked driver so startup races
+/// and genuine multiple drivers remain errors.
+void normalizeInitialState(ModuleOp module) {
+  SmallVector<ProcessOp> processes;
+  module.walk([&](ProcessOp op) { processes.push_back(op); });
+  for (auto process : processes) {
+    if (!process.getBody().hasOneBlock())
+      continue;
+    auto halt = dyn_cast<HaltOp>(process.getBody().front().getTerminator());
+    if (!halt || process.getNumResults() > 1)
+      continue;
+    DriveOp startup;
+    bool supported = true;
+    for (auto &op : process.getBody().front().without_terminator()) {
+      if (auto drive = dyn_cast<DriveOp>(&op)) {
+        if (startup || process.getNumResults()) {
+          supported = false;
+          break;
+        }
+        startup = drive;
+      } else if (!isa<ProbeOp>(op) &&
+                 (!isMemoryEffectFree(&op) || op.getNumRegions() ||
+                  (op.getName().getDialectNamespace() != "comb" &&
+                   op.getName().getDialectNamespace() != "hw" &&
+                   op.getName().getDialectNamespace() != "arith"))) {
+        supported = false;
+        break;
+      }
+    }
+    if (!supported)
+      continue;
+    if (process.getNumResults() == 1) {
+      if (!process.getResult(0).hasOneUse())
+        continue;
+      startup = dyn_cast<DriveOp>(*process.getResult(0).getUsers().begin());
+      if (!startup || startup.getValue() != process.getResult(0) ||
+          startup->getParentOp() != process->getParentOp())
+        continue;
+    }
+    TimeAttr time;
+    if (!startup || startup.getEnable() ||
+        !matchPattern(startup.getTime(), m_Constant(&time)) ||
+        time.getTime() != 0 || time.getDelta() != 0 || time.getEpsilon() != 1)
+      continue;
+    auto signal = startup.getSignal().getDefiningOp<SignalOp>();
+    IntegerAttr initial;
+    if (!signal || signal->getParentOp() != process->getParentOp() ||
+        !signal->hasAttr("llhd.explicit_init") ||
+        signal->hasAttr("llhd.unconstrained") ||
+        !matchPattern(signal.getInit(), m_Constant(&initial)))
+      continue;
+    DriveOp clocked;
+    for (auto *user : signal->getUsers()) {
+      if (user == startup.getOperation() || isa<ProbeOp>(user))
+        continue;
+      auto drive = dyn_cast<DriveOp>(user);
+      if (!drive || clocked) {
+        supported = false;
+        break;
+      }
+      clocked = drive;
+    }
+    if (!supported || !clocked)
+      continue;
+    auto reg = clocked.getValue().getDefiningOp<seq::FirRegOp>();
+    if (reg) {
+      if (reg.getPresetAttr() != initial)
+        continue;
+    } else {
+      auto clockedProcess = clocked->getParentOfType<ProcessOp>();
+      TimeAttr clockedTime;
+      if (!clockedProcess ||
+          !matchPattern(clocked.getTime(), m_Constant(&clockedTime)) ||
+          clockedTime.getTime() != 0 || clockedTime.getDelta() != 1 ||
+          clockedTime.getEpsilon() != 0 ||
+          !clockedProcess.walk([](WaitOp) { return WalkResult::interrupt(); })
+               .wasInterrupted())
+        continue;
+    }
+    Value expression = process.getNumResults() ? halt.getYieldOperands()[0]
+                                               : startup.getValue();
+    auto value = InitialValueEvaluator(signal, initial).evaluate(expression);
+    if (!value || value.getType() != initial.getType())
+      continue;
+    OpBuilder builder(signal);
+    signal.getInitMutable().assign(
+        hw::ConstantOp::create(builder, signal.getLoc(), value));
+    if (reg)
+      reg.setPresetAttr(value);
+    startup.erase();
+    process.erase();
+  }
+}
+
 /// Find an unchanged packed lane through concatenations and nested extracts.
 /// Only return an existing value covering the entire requested interval.
 Value getPackedLane(Value value, unsigned low, unsigned width,
@@ -1017,6 +1167,7 @@ struct LowerLLHDFormalToCorePass
     unrollFormalLoops(module);
     if (failed(cleanup(module)))
       return failure();
+    normalizeInitialState(module);
     normalizeArrayDrives(module);
     // Independent aggregate elements may have different drivers, including a
     // mix of combinational and clocked assignments. Split these before checking
