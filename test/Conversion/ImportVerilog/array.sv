@@ -103,7 +103,8 @@ endmodule
 
 // CHECK-LABEL: @array_slice_dyn_packed_rev
 // CHECK: %[[S:.*]] = moore.sub
-// CHECK: %[[X:.*]] = moore.dyn_extract %arg0 from %[[S]]
+// CHECK: %[[INDEX:.*]] = moore.add %[[S]], {{%.+}}
+// CHECK: %[[X:.*]] = moore.dyn_extract %arg0 from %[[INDEX]]
 // CHECK-NEXT: moore.output %[[X]]
 module array_slice_dyn_packed_rev
     (input wire [0 : 7][15 : 0] arg0,
@@ -114,7 +115,8 @@ endmodule
 
 // CHECK-LABEL: @array_slice_dyn_unpacked
 // CHECK: %[[S:.*]] = moore.sub
-// CHECK: %[[X:.*]] = moore.dyn_extract %arg0 from %[[S]]
+// CHECK: %[[INDEX:.*]] = moore.add %[[S]], {{%.+}}
+// CHECK: %[[X:.*]] = moore.dyn_extract %arg0 from %[[INDEX]]
 // CHECK-NEXT: moore.output %[[X]]
 module array_slice_dyn_unpacked
     (input wire [15 : 0] arg0[8],

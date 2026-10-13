@@ -1391,3 +1391,22 @@ hw.module private @Timeout_10314() {
   }
   hw.output
 }
+
+// Do not promote a slice whose nested projection is in a different block.
+// CHECK-LABEL: @ArraySliceAcrossBlocks
+hw.module @ArraySliceAcrossBlocks(in %u: !hw.array<4xi42>, in %v: i42,
+                                  in %offset: i2, in %index: i1) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %a = llhd.sig %u : !hw.array<4xi42>
+  llhd.process {
+    // CHECK: [[SLICE:%.+]] = llhd.sig.array_slice %a at %offset
+    %slice = llhd.sig.array_slice %a at %offset : <!hw.array<4xi42>> -> <!hw.array<2xi42>>
+    cf.br ^bb1
+  ^bb1:
+    // CHECK: [[ELEMENT:%.+]] = llhd.sig.array_get [[SLICE]][%index]
+    %element = llhd.sig.array_get %slice[%index] : <!hw.array<2xi42>>
+    // CHECK: llhd.drv [[ELEMENT]], %v after {{%.+}}
+    llhd.drv %element, %v after %time : i42
+    llhd.halt
+  }
+}

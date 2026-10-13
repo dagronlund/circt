@@ -593,18 +593,21 @@ struct ExprVisitor {
         offsetAdd = *constRight - 1;
       }
 
-      // Adjust the offset such that it matches the right bound of the range.
-      if (offsetAdd != 0) {
-        if (offsetDyn)
+      // Translate and widen a dynamic base before adjusting it. Adding the
+      // slice width in the source index type can overflow a narrow index.
+      if (offsetDyn) {
+        offsetDyn = getSelectIndex(context, loc, offsetDyn, range);
+        if (!range.isDescending())
+          offsetAdd = -offsetAdd;
+        if (offsetAdd != 0)
           offsetDyn = moore::AddOp::create(
               builder, loc, offsetDyn,
               moore::ConstantOp::create(
                   builder, loc, cast<moore::IntType>(offsetDyn.getType()),
                   offsetAdd,
                   /*isSigned=*/offsetAdd < 0));
-        else
-          offsetConst += offsetAdd;
-      }
+      } else
+        offsetConst += offsetAdd;
     }
 
     // Create a dynamic or constant extract. Use `getSelectIndex` and
@@ -617,7 +620,6 @@ struct ExprVisitor {
         isLvalue ? moore::RefType::get(cast<moore::UnpackedType>(type)) : type;
 
     if (offsetDyn) {
-      offsetDyn = getSelectIndex(context, loc, offsetDyn, range);
       if (isLvalue) {
         return moore::DynExtractRefOp::create(builder, loc, resultType, value,
                                               offsetDyn);

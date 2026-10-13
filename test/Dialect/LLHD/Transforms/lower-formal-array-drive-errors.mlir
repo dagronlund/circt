@@ -134,3 +134,44 @@ hw.module @observed_register(in %clk: !seq.clock, in %a: i4, in %b: i4,
   llhd.drv %data, %second_reg after %time : !hw.array<2xi4>
   hw.output %old, %first_reg : !hw.array<2xi4>, !hw.array<2xi4>
 }
+
+// -----
+
+// Dynamic slice aliases do not hide conflicting clocked process ownership.
+hw.module @slice_overlap(in %offset: i2, in %a: !hw.array<2xi8>,
+                         in %b: !hw.array<2xi8>, out q: !hw.array<4xi8>) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %init = hw.aggregate_constant [0 : i8, 0 : i8, 0 : i8, 0 : i8] : !hw.array<4xi8>
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %data = llhd.sig %init {llhd.unconstrained} : !hw.array<4xi8>
+  llhd.process {
+    %slice = llhd.sig.array_slice %data at %offset : <!hw.array<4xi8>> -> <!hw.array<2xi8>>
+    llhd.drv %slice, %a after %time : !hw.array<2xi8>
+    llhd.halt
+  }
+  llhd.process {
+    %slice = llhd.sig.array_slice %data at %offset : <!hw.array<4xi8>> -> <!hw.array<2xi8>>
+    llhd.drv %slice, %b after %time : !hw.array<2xi8>
+    llhd.halt
+  }
+  %q = llhd.prb %data : !hw.array<4xi8>
+  hw.output %q : !hw.array<4xi8>
+}
+
+// -----
+
+// Projected drives retain the synchronous formal restrictions on scheduling.
+hw.module @delayed_slice(in %offset: i2, in %a: !hw.array<2xi8>,
+                         out q: !hw.array<4xi8>) {
+  %time = llhd.constant_time <1ns, 0d, 0e>
+  %init = hw.aggregate_constant [0 : i8, 0 : i8, 0 : i8, 0 : i8] : !hw.array<4xi8>
+  %data = llhd.sig %init {llhd.unconstrained} : !hw.array<4xi8>
+  llhd.process {
+    %slice = llhd.sig.array_slice %data at %offset : <!hw.array<4xi8>> -> <!hw.array<2xi8>>
+    // expected-error @+1 {{real time delays are unsupported}}
+    llhd.drv %slice, %a after %time : !hw.array<2xi8>
+    llhd.halt
+  }
+  %q = llhd.prb %data : !hw.array<4xi8>
+  hw.output %q : !hw.array<4xi8>
+}

@@ -657,6 +657,11 @@ static Value unpackProjections(OpBuilder &builder, Value value,
                   return builder.createOrFold<hw::ArrayGetOp>(
                       op.getLoc(), value, op.getIndex());
                 })
+                .Case<SigArraySliceOp>([&](auto op) {
+                  return builder.createOrFold<hw::ArraySliceOp>(
+                      op.getLoc(), op.getResultArrayType(), value,
+                      op.getLowIndex());
+                })
                 .Case<SigStructExtractOp>([&](auto op) {
                   // SigStructExtractOp is used for both struct and union
                   // member access; use the appropriate HW extract op.
@@ -674,6 +679,31 @@ static Value unpackProjections(OpBuilder &builder, Value value,
                 });
   }
   return value;
+}
+
+/// Inject a slice through a bitcast so dynamic offsets do not require
+/// expanding the array into one conditional update per element.
+static Value injectArraySlice(OpBuilder &builder, SigArraySliceOp op,
+                              Value input, Value replacement) {
+  auto arrayType = op.getInputArrayType();
+  auto elementWidth = hw::getBitWidth(arrayType.getElementType());
+  if (!elementWidth)
+    return input;
+  auto width = hw::getBitWidth(arrayType);
+  auto loc = op.getLoc();
+  auto flatType = builder.getIntegerType(width);
+  Value base = builder.createOrFold<hw::BitcastOp>(loc, flatType, input);
+  replacement = builder.createOrFold<hw::BitcastOp>(
+      loc, builder.getIntegerType(hw::getBitWidth(replacement.getType())),
+      replacement);
+  // Widen before multiplying: a valid element index can need more bits once
+  // expressed as a bit offset.
+  Value offset = comb::createZExt(builder, loc, op.getLowIndex(), width);
+  Value stride = hw::ConstantOp::create(builder, loc, flatType, elementWidth);
+  offset = builder.createOrFold<comb::MulOp>(loc, offset, stride);
+  Value updated =
+      comb::createDynamicInject(builder, loc, base, offset, replacement);
+  return builder.createOrFold<hw::BitcastOp>(loc, arrayType, updated);
 }
 
 /// Undo a stack of projections by taking the value of the projected field and
@@ -695,6 +725,9 @@ static Value packProjections(OpBuilder &builder, Value value,
                 .Case<SigArrayGetOp>([&](auto op) {
                   return builder.createOrFold<hw::ArrayInjectOp>(
                       op.getLoc(), projection.into, op.getIndex(), value);
+                })
+                .Case<SigArraySliceOp>([&](auto op) {
+                  return injectArraySlice(builder, op, projection.into, value);
                 })
                 .Case<SigStructExtractOp>([&](auto op) {
                   // For unions, creating a new value from a single field
@@ -931,11 +964,12 @@ void Promoter::findPromotableSlots() {
         // stay in the same block. Cross-block nested projections would break
         // during promotion because the projection chain gets severed when
         // Mem2Reg rewrites signal references into SSA block arguments.
-        if (isa<SigArrayGetOp, SigExtractOp, SigStructExtractOp>(user)) {
+        if (isa<SigArrayGetOp, SigArraySliceOp, SigExtractOp,
+                SigStructExtractOp>(user)) {
           hasProjection = true;
           for (auto *projectionUser : user->getUsers()) {
-            if (isa<SigArrayGetOp, SigExtractOp, SigStructExtractOp>(
-                    projectionUser) &&
+            if (isa<SigArrayGetOp, SigArraySliceOp, SigExtractOp,
+                    SigStructExtractOp>(projectionUser) &&
                 projectionUser->getBlock() != user->getBlock())
               return false;
             hasBlockingDrive |= isBlockingDrive(projectionUser);
