@@ -91,3 +91,46 @@ hw.module @undriven_element(in %a: i4, in %sel: i1, out q: i4) {
   %q = hw.array_get %old[%sel] : !hw.array<2xi4>, i1
   hw.output %q : i4
 }
+
+// -----
+
+// Whole-array registers recovered from partial assignments must still reject
+// two actual updates to the same lane.
+hw.module @register_overlap(in %clk: !seq.clock, in %a: i4, in %b: i4,
+                            out q: !hw.array<2xi4>) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.constant false
+  %init = hw.aggregate_constant [0 : i4, 0 : i4] : !hw.array<2xi4>
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %data = llhd.sig %init {llhd.unconstrained} : !hw.array<2xi4>
+  %old = llhd.prb %data : !hw.array<2xi4>
+  %first = hw.array_inject %old[%zero], %a : !hw.array<2xi4>, i1
+  %second = hw.array_inject %old[%zero], %b : !hw.array<2xi4>, i1
+  %first_reg = seq.firreg %first clock %clk : !hw.array<2xi4>
+  %second_reg = seq.firreg %second clock %clk : !hw.array<2xi4>
+  llhd.drv %data, %first_reg after %time : !hw.array<2xi4>
+  llhd.drv %data, %second_reg after %time : !hw.array<2xi4>
+  hw.output %old : !hw.array<2xi4>
+}
+
+// -----
+
+// An independently observed register owns all its lanes, even if its update
+// copies some of them from the driven signal. Do not discard its padding state.
+hw.module @observed_register(in %clk: !seq.clock, in %a: i4, in %b: i4,
+                             out q: !hw.array<2xi4>, out state: !hw.array<2xi4>) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.constant false
+  %one = hw.constant true
+  %init = hw.aggregate_constant [0 : i4, 0 : i4] : !hw.array<2xi4>
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %data = llhd.sig %init {llhd.unconstrained} : !hw.array<2xi4>
+  %old = llhd.prb %data : !hw.array<2xi4>
+  %first = hw.array_inject %old[%zero], %a : !hw.array<2xi4>, i1
+  %second = hw.array_inject %old[%one], %b : !hw.array<2xi4>, i1
+  %first_reg = seq.firreg %first clock %clk : !hw.array<2xi4>
+  %second_reg = seq.firreg %second clock %clk : !hw.array<2xi4>
+  llhd.drv %data, %first_reg after %time : !hw.array<2xi4>
+  llhd.drv %data, %second_reg after %time : !hw.array<2xi4>
+  hw.output %old, %first_reg : !hw.array<2xi4>, !hw.array<2xi4>
+}
