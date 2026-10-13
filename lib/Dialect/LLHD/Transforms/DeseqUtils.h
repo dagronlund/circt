@@ -241,6 +241,8 @@ struct ClockInfo {
   Value value;
   /// Whether the clock is sensitive to a rising or falling edge.
   bool risingEdge;
+  /// Whether state updates on both edges of this one clock (formal only).
+  bool bothEdges = false;
   /// The optional value acting as an enable.
   Value enable;
 

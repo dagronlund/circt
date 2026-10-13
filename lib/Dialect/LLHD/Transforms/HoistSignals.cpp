@@ -675,6 +675,14 @@ void DriveHoister::hoistDrives() {
                       : Value{};
     [[maybe_unused]] auto newDrive =
         DriveOp::create(builder, slot.getLoc(), slot, value, delay, enable);
+    // Retain the provenance of constant one-shot assignments when the halted
+    // process is later folded away. Formal lowering may absorb these into
+    // initial state, but must not confuse ordinary module drives with startup.
+    IntegerAttr initial;
+    if (processOp.getBody().hasOneBlock() &&
+        isa<HaltOp>(processOp.getBody().front().getTerminator()) &&
+        driveSet.ops.size() == 1 && matchPattern(value, m_Constant(&initial)))
+      newDrive->setAttr("llhd.initial", builder.getUnitAttr());
     LLVM_DEBUG(llvm::dbgs() << "- Add " << newDrive << "\n");
 
     // Remove the old drives inside of the process.

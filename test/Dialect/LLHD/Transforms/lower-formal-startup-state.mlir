@@ -21,3 +21,20 @@ hw.module @startup(in %clk: !seq.clock, in %data: i8, out q: i8) {
   llhd.drv %s, %reg after %time : i8
   hw.output %old : i8
 }
+
+// A one-shot constant assignment supplies the original scalar initial state,
+// even if the declaration only supplied an unconstrained scheduling value.
+// CHECK-LABEL: hw.module @constant_startup
+// CHECK: [[Q:%.+]] = seq.firreg %data clock %clk preset 7 : i8
+// CHECK-NEXT: hw.output [[Q]] : i8
+hw.module @constant_startup(in %clk: !seq.clock, in %data: i8, out q: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.constant 0 : i8
+  %seven = hw.constant 7 : i8
+  %s = llhd.sig %zero {llhd.unconstrained} : i8
+  llhd.drv %s, %seven after %time {llhd.initial} : i8
+  %reg = seq.firreg %data clock %clk : i8
+  llhd.drv %s, %reg after %time : i8
+  %q = llhd.prb %s : i8
+  hw.output %q : i8
+}
