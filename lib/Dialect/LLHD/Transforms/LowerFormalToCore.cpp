@@ -394,6 +394,89 @@ struct InitialValueEvaluator {
   DenseSet<Value> active;
 };
 
+/// Find the sole recurring driver alongside a startup assignment. Before
+/// HoistSignals the drive is inside its process; afterwards the value is a
+/// process result or an already extracted register.
+DriveOp getClockedDriver(SignalOp signal, DriveOp startup) {
+  DriveOp clocked;
+  for (auto *user : signal->getUsers()) {
+    if (user == startup.getOperation() || isa<ProbeOp>(user))
+      continue;
+    auto drive = dyn_cast<DriveOp>(user);
+    if (!drive || clocked)
+      return {};
+    clocked = drive;
+  }
+  if (!clocked)
+    return {};
+  if (clocked.getValue().getDefiningOp<seq::FirRegOp>())
+    return clocked;
+  auto process = clocked->getParentOfType<ProcessOp>();
+  if (!process)
+    process = clocked.getValue().getDefiningOp<ProcessOp>();
+  TimeAttr time;
+  if (!process || !matchPattern(clocked.getTime(), m_Constant(&time)) ||
+      time.getTime() != 0 || time.getDelta() != 1 || time.getEpsilon() != 0 ||
+      !process.walk([](WaitOp) { return WalkResult::interrupt(); })
+           .wasInterrupted())
+    return {};
+  return clocked;
+}
+
+/// Constant startup assignments also initialize otherwise unconstrained state.
+/// Module-level assignments require the provenance retained by HoistSignals.
+void normalizeConstantInitialState(ModuleOp module) {
+  SmallVector<DriveOp> drives;
+  module.walk([&](DriveOp op) { drives.push_back(op); });
+  for (auto startup : drives) {
+    auto process = startup->getParentOfType<ProcessOp>();
+    if (process) {
+      if (process.getNumResults() || !process.getBody().hasOneBlock() ||
+          !isa<HaltOp>(process.getBody().front().getTerminator()) ||
+          !llvm::all_of(process.getBody().front().without_terminator(),
+                        [&](Operation &op) {
+                          return &op == startup.getOperation() ||
+                                 (isMemoryEffectFree(&op) &&
+                                  !op.getNumRegions());
+                        }))
+        continue;
+    } else if (!isa<hw::HWModuleOp>(startup->getParentOp()) ||
+               !startup->hasAttr("llhd.initial"))
+      continue;
+    IntegerAttr value;
+    TimeAttr time;
+    if (startup.getEnable() ||
+        !matchPattern(startup.getValue(), m_Constant(&value)) ||
+        !matchPattern(startup.getTime(), m_Constant(&time)) ||
+        time.getTime() != 0 || time.getDelta() != 0 || time.getEpsilon() != 1)
+      continue;
+    auto signal = startup.getSignal().getDefiningOp<SignalOp>();
+    if (!signal || !isa<hw::HWModuleOp>(signal->getParentOp()))
+      continue;
+    auto clocked = getClockedDriver(signal, startup);
+    if (!clocked)
+      continue;
+    auto reg = clocked.getValue().getDefiningOp<seq::FirRegOp>();
+    if (reg && reg.getPresetAttr()) {
+      IntegerAttr initial;
+      if (signal->hasAttr("llhd.unconstrained") ||
+          !matchPattern(signal.getInit(), m_Constant(&initial)) ||
+          reg.getPresetAttr() != initial)
+        continue;
+    }
+    OpBuilder builder(signal);
+    signal.getInitMutable().assign(
+        hw::ConstantOp::create(builder, signal.getLoc(), value));
+    signal->removeAttr("llhd.unconstrained");
+    signal->setAttr("llhd.explicit_init", UnitAttr::get(module.getContext()));
+    if (reg)
+      reg.setPresetAttr(value);
+    startup.erase();
+    if (process)
+      process.erase();
+  }
+}
+
 /// A single constant blocking startup assignment refines a scalar declaration
 /// initializer. Recognize both raw processes and the result/drive pair left by
 /// ordinary Mem2Reg. Require exactly one other, clocked driver so startup races
@@ -447,32 +530,12 @@ void normalizeInitialState(ModuleOp module) {
         signal->hasAttr("llhd.unconstrained") ||
         !matchPattern(signal.getInit(), m_Constant(&initial)))
       continue;
-    DriveOp clocked;
-    for (auto *user : signal->getUsers()) {
-      if (user == startup.getOperation() || isa<ProbeOp>(user))
-        continue;
-      auto drive = dyn_cast<DriveOp>(user);
-      if (!drive || clocked) {
-        supported = false;
-        break;
-      }
-      clocked = drive;
-    }
-    if (!supported || !clocked)
+    auto clocked = getClockedDriver(signal, startup);
+    if (!clocked)
       continue;
     auto reg = clocked.getValue().getDefiningOp<seq::FirRegOp>();
     if (reg) {
       if (reg.getPresetAttr() != initial)
-        continue;
-    } else {
-      auto clockedProcess = clocked->getParentOfType<ProcessOp>();
-      TimeAttr clockedTime;
-      if (!clockedProcess ||
-          !matchPattern(clocked.getTime(), m_Constant(&clockedTime)) ||
-          clockedTime.getTime() != 0 || clockedTime.getDelta() != 1 ||
-          clockedTime.getEpsilon() != 0 ||
-          !clockedProcess.walk([](WaitOp) { return WalkResult::interrupt(); })
-               .wasInterrupted())
         continue;
     }
     Value expression = process.getNumResults() ? halt.getYieldOperands()[0]
@@ -1167,6 +1230,7 @@ struct LowerLLHDFormalToCorePass
     unrollFormalLoops(module);
     if (failed(cleanup(module)))
       return failure();
+    normalizeConstantInitialState(module);
     normalizeInitialState(module);
     normalizeArrayDrives(module);
     // Independent aggregate elements may have different drivers, including a
@@ -1204,7 +1268,7 @@ struct LowerLLHDFormalToCorePass
       return failure();
     auto remaining = module.walk([&](ProcessOp op) -> WalkResult {
       op.emitError(
-          "unsupported formal process: expected a recognizable single-edge "
+          "unsupported formal process: expected a recognizable edge-triggered "
           "clocked process or a property-only wrapper; multiple clocks, "
           "event-region dependencies and general loops are unsupported");
       return WalkResult::interrupt();
@@ -1268,8 +1332,9 @@ struct LowerLLHDFormalToCorePass
         return failure();
     if (failed(cleanup(module)))
       return failure();
-    // Region simplification may materialize integer constants with Arith.
-    // Normalize those implementation artifacts before enforcing dialect purity.
+    // Region simplification may materialize constants and selections with
+    // Arith. Normalize those implementation artifacts before enforcing dialect
+    // purity.
     SmallVector<arith::ConstantOp> constants;
     module.walk([&](arith::ConstantOp op) { constants.push_back(op); });
     for (auto op : constants) {
@@ -1280,6 +1345,17 @@ struct LowerLLHDFormalToCorePass
       OpBuilder builder(op);
       auto core = hw::ConstantOp::create(builder, op.getLoc(), value);
       op.replaceAllUsesWith(core.getResult());
+      op.erase();
+    }
+    SmallVector<arith::SelectOp> selects;
+    module.walk([&](arith::SelectOp op) { selects.push_back(op); });
+    for (auto op : selects) {
+      if (!isa<IntegerType>(op.getType()))
+        continue;
+      OpBuilder builder(op);
+      auto mux = comb::MuxOp::create(builder, op.getLoc(), op.getCondition(),
+                                     op.getTrueValue(), op.getFalseValue());
+      op.replaceAllUsesWith(mux.getResult());
       op.erase();
     }
     if (failed(normalizePackedSlices(module)) || failed(cleanup(module)))

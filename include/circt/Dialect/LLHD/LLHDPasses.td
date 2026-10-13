@@ -14,7 +14,7 @@ include "mlir/Pass/PassBase.td"
 def LowerLLHDFormalToCorePass : Pass<"lower-llhd-formal-to-core", "ModuleOp"> {
   let summary = "Strict verification-aware LLHD to HW/Seq/Comb lowering";
   let description = [{
-    Converts acyclic combinational checks and recognizable single-edge LLHD
+    Converts acyclic combinational checks and recognizable edge-triggered LLHD
     processes under a synchronous two-state sampling model. Lowers fixed finite
     temporal monitors, preserving asynchronous cancellation and initial state.
     Successful output contains only HW, Seq, Comb and Boolean assert/assume/cover

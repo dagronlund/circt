@@ -241,6 +241,7 @@ struct Deseq {
 
   void implementRegisters();
   void implementRegister(DriveInfo &drive);
+  void implementDualEdgeRegister(DriveInfo &drive);
 
   Value specializeValue(Value value, FixedValues fixedValues);
   ValueRange specializeProcess(FixedValues fixedValues);
@@ -1164,6 +1165,35 @@ bool Deseq::matchDrive(DriveInfo &drive) {
 /// value table and store the results in `drive.clock`.
 bool Deseq::matchDriveClock(
     DriveInfo &drive, ArrayRef<std::pair<DNFTerm, ValueEntry>> valueTable) {
+  // Formal integer state can be encoded by two opposite-edge phase registers.
+  // Require precisely the rising and falling transitions of one clock; level
+  // sensitivity and unrelated clocks must not be represented this way.
+  if (formal && valueTable.size() == 2 && !wait.getDelay() &&
+      isa<IntegerType>(drive.op.getValue().getType())) {
+    bool rising = false, falling = false, enabled = false;
+    for (auto &entry : valueTable) {
+      auto condition = entry.first;
+      if (condition == DNFTerm{0b0110 << 2})
+        rising = true;
+      else if (condition == DNFTerm{0b1001 << 2})
+        falling = true;
+      else if (condition == DNFTerm{(0b0110 << 2) | 0b01})
+        rising = enabled = true;
+      else if (condition == DNFTerm{(0b1001 << 2) | 0b01})
+        falling = enabled = true;
+      else
+        return false;
+    }
+    if (rising && falling) {
+      drive.clock.clock = triggers[0].getProjected();
+      drive.clock.risingEdge = true;
+      drive.clock.bothEdges = true;
+      drive.clock.value = drive.op.getValue();
+      if (enabled)
+        drive.clock.enable = drive.op.getEnable();
+      return true;
+    }
+  }
   // We need exactly one entry in the value table to represent a register
   // without reset.
   if (valueTable.size() != 1) {
@@ -1433,6 +1463,10 @@ void Deseq::implementRegisters() {
 /// `llhd.process` into a purely combinational `llhd.combinational` that is
 /// simplified by assuming that the clock edge occurs.
 void Deseq::implementRegister(DriveInfo &drive) {
+  if (drive.clock.bothEdges) {
+    implementDualEdgeRegister(drive);
+    return;
+  }
   OpBuilder builder(drive.op);
   auto loc = drive.op.getLoc();
 
@@ -1569,6 +1603,61 @@ void Deseq::implementRegister(DriveInfo &drive) {
     if (!epsilonDelay)
       epsilonDelay =
           ConstantTimeOp::create(builder, process.getLoc(), 0, "ns", 0, 1);
+    drive.op.getTimeMutable().assign(epsilonDelay);
+  }
+}
+
+/// Encode dual-edge integer state as q = rising XOR falling. On a rising edge,
+/// rising takes D XOR falling; on a falling edge, falling takes D XOR rising.
+/// The opposite phase holds at each edge, so q takes precisely D. Initializing
+/// the falling phase to zero leaves all original initial states representable.
+void Deseq::implementDualEdgeRegister(DriveInfo &drive) {
+  OpBuilder builder(drive.op);
+  auto loc = drive.op.getLoc();
+  SmallDenseMap<Value, Value, 8> rematerialized;
+  Value clockValue =
+      materializeProjection(builder, loc, drive.clock.clock, rematerialized);
+  auto clock = builder.createOrFold<seq::ToClockOp>(loc, clockValue);
+  auto inverted = seq::ClockInverterOp::create(builder, loc, clock);
+  auto type = cast<IntegerType>(drive.op.getValue().getType());
+  auto zeroAttr = builder.getIntegerAttr(type, 0);
+  auto zero = hw::ConstantOp::create(builder, loc, zeroAttr);
+  IntegerAttr preset;
+  StringAttr name;
+  if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>()) {
+    name = signal.getNameAttr();
+    if (!signal->hasAttr("llhd.unconstrained"))
+      matchPattern(signal.getInit(), m_Constant(&preset));
+  }
+  auto rising = seq::FirRegOp::create(
+      builder, loc, zero, clock,
+      builder.getStringAttr(name ? (name.getValue() + ".rise").str() : ""),
+      hw::InnerSymAttr{}, preset);
+  auto falling = seq::FirRegOp::create(
+      builder, loc, zero, inverted,
+      builder.getStringAttr(name ? (name.getValue() + ".fall").str() : ""),
+      hw::InnerSymAttr{}, zeroAttr);
+  for (bool isRising : {true, false}) {
+    FixedValues edge{{drive.clock.clock, !isRising, isRising}};
+    Value value = specializeValue(drive.clock.value, edge);
+    Value next = builder.createOrFold<comb::XorOp>(
+        loc, value, isRising ? falling.getResult() : rising.getResult());
+    auto reg = isRising ? rising : falling;
+    if (drive.clock.enable) {
+      Value enable = specializeValue(drive.clock.enable, edge);
+      next = comb::MuxOp::create(builder, loc, enable, next, reg.getResult(),
+                                 true);
+    }
+    reg.getNextMutable().assign(next);
+  }
+  drive.op.getValueMutable().assign(builder.createOrFold<comb::XorOp>(
+      loc, rising.getResult(), falling.getResult()));
+  drive.op.getEnableMutable().clear();
+  TimeAttr time;
+  if (matchPattern(drive.op.getTime(), m_Constant(&time)) &&
+      time.getTime() == 0 && time.getDelta() == 1 && time.getEpsilon() == 0) {
+    if (!epsilonDelay)
+      epsilonDelay = ConstantTimeOp::create(builder, loc, 0, "ns", 0, 1);
     drive.op.getTimeMutable().assign(epsilonDelay);
   }
 }
@@ -1881,7 +1970,8 @@ bool Deseq::matchChecks() {
     return false;
   checkRising = canPos;
   for (auto &drive : driveInfos)
-    if (drive.reset || drive.clock.clock != checkClock ||
+    if (drive.reset || drive.clock.bothEdges ||
+        drive.clock.clock != checkClock ||
         drive.clock.risingEdge != checkRising)
       return false;
   return true;

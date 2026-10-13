@@ -65,10 +65,21 @@ unrelated clocks, general process loops, and event-region dependencies fail.
 Property-only trampoline/self-loop wrappers are recognized separately. Only
 scheduled nonblocking drives may commute across verification observations.
 
+Integer state updated on both edges of one clock is represented by two
+opposite-edge phase registers whose XOR is the observable state. Each phase
+captures the next value XOR the other phase, retaining per-edge enables. The
+falling phase starts at zero; the rising phase carries the original preset or
+unconstrained initial state. Dual-edge processes containing verification checks,
+multiple clocks, or asynchronous reset are not supported by this encoding.
+
 Constant native LLHD signal initial values become register presets. Frontend
 integer variables carry `llhd.explicit_init` or `llhd.unconstrained` provenance;
 implicit scheduling zeros and initial wait placeholders do not constrain state.
 Explicit constant initialization survives the ordinary frontend pipeline.
+Constant blocking startup assignments also become initial state. Hoisted
+one-shot constant drives retain `llhd.initial` provenance so they can be
+distinguished from ordinary module-level drivers. Startup races and runtime
+inputs are not evaluated as constants.
 Nonconstant formal register initialization is rejected. Legacy IR without
 provenance cannot recover source initialization that was already discarded.
 

@@ -103,3 +103,33 @@ hw.module @recurring_startup_result(in %clk: !seq.clock, in %data: i8) {
   llhd.drv %s, %reg after %time : i8
   hw.output
 }
+
+// -----
+
+// A constant module-level drive without startup provenance is still a driver.
+hw.module @unmarked_constant(in %clk: !seq.clock, in %data: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %one = hw.constant 1 : i8
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %one {llhd.unconstrained} : i8
+  llhd.drv %s, %one after %time : i8
+  %reg = seq.firreg %data clock %clk : i8
+  llhd.drv %s, %reg after %time : i8
+  hw.output
+}
+
+// -----
+
+// Two marked startup writers must not be absorbed in an arbitrary order.
+hw.module @marked_startup_race(in %clk: !seq.clock, in %data: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %one = hw.constant 1 : i8
+  %two = hw.constant 2 : i8
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %one {llhd.unconstrained} : i8
+  llhd.drv %s, %one after %time {llhd.initial} : i8
+  llhd.drv %s, %two after %time {llhd.initial} : i8
+  %reg = seq.firreg %data clock %clk : i8
+  llhd.drv %s, %reg after %time : i8
+  hw.output
+}
