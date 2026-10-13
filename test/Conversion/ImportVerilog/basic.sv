@@ -3377,10 +3377,10 @@ module RangeElementSelection(
       // CHECK: [[READ_B:%.+]] = moore.read %b : <l4>
       // CHECK: [[READ_C_1:%.+]] = moore.read [[C]] : <l2>
       // CHECK: [[EXTRACT:%.+]] = moore.extract [[READ_C_1]] from 0 : l2 -> l1
-      // CHECK: [[ONE:%.+]] = moore.constant 1 : l1
-      // CHECK: [[SUB_2:%.+]] = moore.add [[EXTRACT]], [[ONE]] : l1
-      // CHECK: [[SUB_2EXT:%.+]] = moore.zext [[SUB_2]] : l1 -> l2
-      // CHECK: [[DYN_EXT_2:%.+]] = moore.dyn_extract [[READ_B]] from [[SUB_2EXT]] : l4, l2 -> l2
+      // CHECK: [[EXT:%.+]] = moore.zext [[EXTRACT]] : l1 -> l2
+      // CHECK: [[MINUS_ONE:%.+]] = moore.constant -1 : l2
+      // CHECK: [[SUB_2:%.+]] = moore.add [[EXT]], [[MINUS_ONE]] : l2
+      // CHECK: [[DYN_EXT_2:%.+]] = moore.dyn_extract [[READ_B]] from [[SUB_2]] : l4, l2 -> l2
       b = a[c];
       b[3:0] = b[c[0]-:2];
     end
@@ -3512,17 +3512,17 @@ function void rangeSelectLValue(
   // CHECK: moore.dyn_extract_ref %arg0 from [[TMP2]] : <i8>, i6 -> <i5>
   a[i+:5] = '0;  // a[i+5-1:i] = a[i+4:i] = bits[(i+4)-2:i-2]; offset = i-2
 
-  // CHECK: [[TMP1:%.+]] = moore.constant 4 : i6
-  // CHECK: [[TMP2:%.+]] = moore.add %arg2, [[TMP1]] : i6
-  // CHECK: [[TMP3:%.+]] = moore.constant 9 : i6
-  // CHECK: [[TMP4:%.+]] = moore.sub [[TMP3]], [[TMP2]] : i6
+  // CHECK: [[TMP1:%.+]] = moore.constant 9 : i6
+  // CHECK: [[TMP2:%.+]] = moore.sub [[TMP1]], %arg2 : i6
+  // CHECK: [[TMP3:%.+]] = moore.constant -4 : i6
+  // CHECK: [[TMP4:%.+]] = moore.add [[TMP2]], [[TMP3]] : i6
   // CHECK: moore.dyn_extract_ref %arg1 from [[TMP4]] : <i8>, i6 -> <i5>
   b[i+:5] = '0;  // b[i:i+5-1] = b[i:i+4] = bits[9-i:9-(i+4)]; offset = 9-(i+4)
 
-  // CHECK: [[TMP1:%.+]] = moore.constant -4 : i6
-  // CHECK: [[TMP2:%.+]] = moore.add %arg2, [[TMP1]] : i6
-  // CHECK: [[TMP3:%.+]] = moore.constant 2 : i6
-  // CHECK: [[TMP4:%.+]] = moore.sub [[TMP2]], [[TMP3]] : i6
+  // CHECK: [[TMP1:%.+]] = moore.constant 2 : i6
+  // CHECK: [[TMP2:%.+]] = moore.sub %arg2, [[TMP1]] : i6
+  // CHECK: [[TMP3:%.+]] = moore.constant -4 : i6
+  // CHECK: [[TMP4:%.+]] = moore.add [[TMP2]], [[TMP3]] : i6
   // CHECK: moore.dyn_extract_ref %arg0 from [[TMP4]] : <i8>, i6 -> <i5>
   a[i-:5] = '0;  // a[i:i-5+1] = a[i:i-4] = bits[i-2:(i-4)-2]; offset = (i-4)-2
 
@@ -3563,17 +3563,17 @@ function void rangeSelectRValue(
   // CHECK: moore.dyn_extract %arg0 from [[TMP2]] : i8, i6 -> i5
   z = a[i+:5];  // a[i+5-1:i] = a[i+4:i] = bits[(i+4)-2:i-2]; offset = i-2
 
-  // CHECK: [[TMP1:%.+]] = moore.constant 4 : i6
-  // CHECK: [[TMP2:%.+]] = moore.add %arg2, [[TMP1]] : i6
-  // CHECK: [[TMP3:%.+]] = moore.constant 9 : i6
-  // CHECK: [[TMP4:%.+]] = moore.sub [[TMP3]], [[TMP2]] : i6
+  // CHECK: [[TMP1:%.+]] = moore.constant 9 : i6
+  // CHECK: [[TMP2:%.+]] = moore.sub [[TMP1]], %arg2 : i6
+  // CHECK: [[TMP3:%.+]] = moore.constant -4 : i6
+  // CHECK: [[TMP4:%.+]] = moore.add [[TMP2]], [[TMP3]] : i6
   // CHECK: moore.dyn_extract %arg1 from [[TMP4]] : i8, i6 -> i5
   z = b[i+:5];  // b[i:i+5-1] = b[i:i+4] = bits[9-i:9-(i+4)]; offset = 9-(i+4)
 
-  // CHECK: [[TMP1:%.+]] = moore.constant -4 : i6
-  // CHECK: [[TMP2:%.+]] = moore.add %arg2, [[TMP1]] : i6
-  // CHECK: [[TMP3:%.+]] = moore.constant 2 : i6
-  // CHECK: [[TMP4:%.+]] = moore.sub [[TMP2]], [[TMP3]] : i6
+  // CHECK: [[TMP1:%.+]] = moore.constant 2 : i6
+  // CHECK: [[TMP2:%.+]] = moore.sub %arg2, [[TMP1]] : i6
+  // CHECK: [[TMP3:%.+]] = moore.constant -4 : i6
+  // CHECK: [[TMP4:%.+]] = moore.add [[TMP2]], [[TMP3]] : i6
   // CHECK: moore.dyn_extract %arg0 from [[TMP4]] : i8, i6 -> i5
   z = a[i-:5];  // a[i:i-5+1] = a[i:i-4] = bits[i-2:(i-4)-2]; offset = (i-4)-2
 
@@ -4022,7 +4022,9 @@ module partselect_index_neg_le;
   // CHECK: [[SEXT:%.+]] = moore.sext {{.*}} : l1 -> l3
   // CHECK-NEXT: [[MCONST:%.+]] = moore.constant -3 : l3
   // CHECK-NEXT: [[SUB:%.+]] = moore.sub [[SEXT]], [[MCONST]] : l3
-  // CHECK-NEXT: [[EXTR:%.+]] = moore.dyn_extract {{.*}} from [[SUB]] : l4, l3 -> l2
+  // CHECK-NEXT: [[ADJUST:%.+]] = moore.constant -1 : l3
+  // CHECK-NEXT: [[INDEX:%.+]] = moore.add [[SUB]], [[ADJUST]] : l3
+  // CHECK-NEXT: [[EXTR:%.+]] = moore.dyn_extract {{.*}} from [[INDEX]] : l4, l3 -> l2
   logic [1:0] res = c[s-:2];
 
 endmodule

@@ -893,14 +893,23 @@ LogicalResult preflight(ModuleOp module, bool normalized = false,
     }
     if (auto signal = dyn_cast<SignalOp>(op)) {
       DenseSet<Operation *> drivers;
-      for (auto *user : signal->getUsers()) {
-        if (isa<DriveOp>(user)) {
-          auto process = user->getParentOfType<ProcessOp>();
-          drivers.insert(process ? process.getOperation() : user);
-        } else if (!isa<ProbeOp>(user)) {
-          user->emitError(
-              "unsupported signal access in strict formal lowering");
-          return WalkResult::interrupt();
+      SmallVector<Value> worklist{signal.getResult()};
+      while (!worklist.empty()) {
+        for (auto *user : worklist.pop_back_val().getUsers()) {
+          if (isa<DriveOp>(user)) {
+            auto process = user->getParentOfType<ProcessOp>();
+            drivers.insert(process ? process.getOperation() : user);
+          } else if (!normalized &&
+                     isa<SigArrayGetOp, SigArraySliceOp, SigExtractOp,
+                         SigStructExtractOp>(user)) {
+            // Dynamic projections cannot be split by SROA. Count their actual
+            // drivers before Mem2Reg promotes them to whole-signal updates.
+            worklist.push_back(user->getResult(0));
+          } else if (!isa<ProbeOp>(user)) {
+            user->emitError(
+                "unsupported signal access in strict formal lowering");
+            return WalkResult::interrupt();
+          }
         }
       }
       // Module-level undriven slices may only feed a process sensitivity list.
