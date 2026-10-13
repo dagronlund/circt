@@ -25,6 +25,7 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/MathExtras.h"
 #include <limits>
 
 namespace circt::llhd {
@@ -676,6 +677,44 @@ void normalizeArrayDrives(ModuleOp module) {
   }
 }
 
+/// Register extraction can hide every partial array access behind whole-array
+/// registers and drives. Expose the lanes of multiply driven array signals so
+/// SROA can split their storage and normalizeRegisterDrives can distinguish
+/// actual updates from registered passthrough lanes.
+void splitArrayRegisterDrives(ModuleOp module) {
+  SmallVector<DriveOp> drives;
+  module.walk([&](DriveOp op) { drives.push_back(op); });
+  for (auto drive : drives) {
+    auto type = dyn_cast<hw::ArrayType>(drive.getValue().getType());
+    if (!type || !isa<hw::HWModuleOp>(drive->getParentOp()) ||
+        !drive.getValue().getDefiningOp<seq::FirRegOp>() ||
+        !drive.getSignal().getDefiningOp<SignalOp>() ||
+        !llvm::any_of(drive.getSignal().getUsers(), [&](Operation *user) {
+          auto other = dyn_cast<DriveOp>(user);
+          return other && other != drive &&
+                 other.getSignal() == drive.getSignal();
+        }))
+      continue;
+
+    OpBuilder builder(drive);
+    auto indexType = builder.getIntegerType(
+        std::max(1u, llvm::Log2_64_Ceil(type.getNumElements())));
+    for (uint64_t i = 0, e = type.getNumElements(); i < e; ++i) {
+      Value index =
+          hw::ConstantOp::create(builder, drive.getLoc(), indexType, i);
+      Value target = SigArrayGetOp::create(builder, drive.getLoc(),
+                                           drive.getSignal(), index);
+      Value value = hw::ArrayGetOp::create(builder, drive.getLoc(),
+                                           drive.getValue(), index);
+      IRMapping mapping;
+      mapping.map(drive.getSignal(), target);
+      mapping.map(drive.getValue(), value);
+      builder.clone(*drive, mapping);
+    }
+    drive.erase();
+  }
+}
+
 /// Ordinary register extraction can pad a partial write with probes of the
 /// untouched signal lanes. After SROA, those lanes appear to have both their
 /// actual driver and a registered copy of themselves. Recover the partial write
@@ -1233,6 +1272,7 @@ struct LowerLLHDFormalToCorePass
     normalizeConstantInitialState(module);
     normalizeInitialState(module);
     normalizeArrayDrives(module);
+    splitArrayRegisterDrives(module);
     // Independent aggregate elements may have different drivers, including a
     // mix of combinational and clocked assignments. Split these before checking
     // driver ownership or promoting partial writes to whole-signal updates.
