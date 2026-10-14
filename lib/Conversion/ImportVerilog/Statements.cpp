@@ -976,6 +976,16 @@ struct StmtVisitor {
       builder.setInsertionPointToEnd(falseBlock);
       if (failed(context.convertStatement(*stmt.ifFalse)))
         return failure();
+      // Retain the origin of an immediate assertion's diagnostic without
+      // adding a second check to the simulation path. Formal lowering can
+      // recover the assertion failure at this same execution point.
+      if (stmt.assertionKind == slang::ast::AssertionKind::Assert &&
+          !stmt.isDeferred && !stmt.isFinal &&
+          (!stmt.ifTrue || stmt.ifTrue->as_if<slang::ast::EmptyStatement>()) &&
+          builder.getInsertionBlock() == falseBlock && !falseBlock->empty())
+        if (auto diagnostic = dyn_cast<moore::SeverityBIOp>(falseBlock->back());
+            diagnostic && diagnostic.getSeverity() == moore::Severity::Error)
+          diagnostic->setAttr("verif.assertion_failure", builder.getUnitAttr());
       if (!isTerminated())
         cf::BranchOp::create(builder, loc, &exitBlock);
     }
