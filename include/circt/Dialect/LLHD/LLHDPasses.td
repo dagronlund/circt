@@ -24,7 +24,7 @@ def LowerLLHDFormalToCorePass : Pass<"lower-llhd-formal-to-core", "ModuleOp"> {
   }];
   let dependentDialects = [
     "comb::CombDialect", "hw::HWDialect", "llhd::LLHDDialect",
-    "ltl::LTLDialect", "seq::SeqDialect", "verif::VerifDialect",
+    "ltl::LTLDialect", "seq::SeqDialect", "sim::SimDialect", "verif::VerifDialect",
   ];
   let options = [Option<"maxMonitorDepth", "max-monitor-depth", "unsigned",
                        "256", "Maximum expanded temporal monitor depth">];

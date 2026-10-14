@@ -3409,6 +3409,10 @@ def SeverityBIOp : Builtin<"severity"> {
     `$fatal`; printing of the additional statistics and the call to `$finish`
     must be done through the `finish_message` and `finish` ops.
 
+    The optional `verif.assertion_failure` unit attribute records a diagnostic
+    reached on failure of an immediate assertion. It has no simulation effect;
+    formal lowering may replace the diagnostic with a failing assertion.
+
     See IEEE 1800-2017 § 20.10 "Severity tasks".
   }];
   let arguments = (ins

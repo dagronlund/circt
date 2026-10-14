@@ -3769,7 +3769,11 @@ static LogicalResult convert(SeverityBIOp op, SeverityBIOp::Adaptor adaptor,
       sim::FormatLiteralOp::create(rewriter, op.getLoc(), severityString);
   auto message = sim::FormatStringConcatOp::create(
       rewriter, op.getLoc(), ValueRange{prefix, adaptor.getMessage()});
-  rewriter.replaceOpWithNewOp<sim::PrintFormattedProcOp>(op, message);
+  auto failure = op->getAttr("verif.assertion_failure");
+  auto print =
+      rewriter.replaceOpWithNewOp<sim::PrintFormattedProcOp>(op, message);
+  if (failure)
+    print->setAttr("verif.assertion_failure", failure);
   return success();
 }
 

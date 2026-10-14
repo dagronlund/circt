@@ -13,6 +13,7 @@
 #include "circt/Dialect/LLHD/LLHDPasses.h"
 #include "circt/Dialect/LTL/LTLOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AttrTypeSubElements.h"
@@ -938,6 +939,26 @@ LogicalResult preflight(ModuleOp module, bool normalized = false,
   return failure(result.wasInterrupted());
 }
 
+/// An immediate assertion with an explicit $error action is represented by a
+/// diagnostic in its failure branch. Recover the check before rejecting Sim
+/// operations, then let cleanup remove the unused formatting and value probes.
+void recoverAssertionFailures(ModuleOp module) {
+  SmallVector<sim::PrintFormattedProcOp> diagnostics;
+  module.walk([&](sim::PrintFormattedProcOp op) {
+    if (op->getAttrOfType<UnitAttr>("verif.assertion_failure") &&
+        !op.getStream())
+      diagnostics.push_back(op);
+  });
+  for (auto op : diagnostics) {
+    OpBuilder builder(op);
+    Value condition =
+        hw::ConstantOp::create(builder, op.getLoc(), builder.getI1Type(), 0);
+    verif::AssertOp::create(builder, op.getLoc(), condition, Value{},
+                            StringAttr{});
+    op.erase();
+  }
+}
+
 /// Time-valued data is an unsigned i64 count of femtoseconds, as in the Moore
 /// frontend. Scheduling operands retain LLHD time and are checked separately.
 /// Split constants shared by data and scheduling before rewriting types, so
@@ -1273,6 +1294,7 @@ struct LowerLLHDFormalToCorePass
   LogicalResult lower(ModuleOp module) {
     if (!maxMonitorDepth)
       return module.emitError("max-monitor-depth must be positive");
+    recoverAssertionFailures(module);
     // Resolve static procedural loops before SROA and driver validation. Their
     // induction variables may select independently driven packed slices.
     unrollFormalLoops(module);
