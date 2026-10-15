@@ -342,6 +342,55 @@ LogicalResult unwrapPropertyProcess(ProcessOp process) {
   return success();
 }
 
+/// After static loop unrolling and signal promotion, a fully initialized ROM
+/// is a one-shot process yielding constant data. Inline that data without
+/// accepting startup expressions that sample inputs or unwritten signal lanes.
+LogicalResult unwrapConstantInitialProcess(ProcessOp process) {
+  if (!isa<hw::HWModuleOp>(process->getParentOp()) ||
+      !process.getBody().hasOneBlock())
+    return failure();
+  auto &block = process.getBody().front();
+  auto halt = dyn_cast<HaltOp>(block.getTerminator());
+  if (!halt)
+    return failure();
+
+  DenseMap<Value, bool> constants;
+  std::function<bool(Value, unsigned)> isConstant = [&](Value value,
+                                                        unsigned depth) {
+    auto [it, inserted] = constants.try_emplace(value, false);
+    if (!inserted)
+      return it->second;
+    auto *op = value.getDefiningOp();
+    if (!op || depth == 64 || !isMemoryEffectFree(op) || op->getNumRegions())
+      return false;
+    auto dialect = op->getName().getDialectNamespace();
+    // Hardware instances and registers can have constant inputs without
+    // constant outputs. Only admit literal data and aggregate constructors
+    // from HW, plus pure arithmetic on such data.
+    if (!isa<hw::ConstantOp, hw::AggregateConstantOp, hw::ArrayCreateOp,
+             hw::StructCreateOp, hw::UnionCreateOp, hw::BitcastOp>(op) &&
+        dialect != "comb" && dialect != "arith")
+      return false;
+    return constants[value] = llvm::all_of(op->getOperands(), [&](Value v) {
+             return isConstant(v, depth + 1);
+           });
+  };
+  for (auto &op : block.without_terminator())
+    if (!op.getNumResults() || !llvm::all_of(op.getResults(), [&](Value value) {
+          return isConstant(value, 0);
+        }))
+      return failure();
+  if (!llvm::all_of(halt.getYieldOperands(),
+                    [&](Value value) { return isConstant(value, 0); }))
+    return failure();
+
+  process.replaceAllUsesWith(halt.getYieldOperands());
+  while (!block.without_terminator().empty())
+    block.front().moveBefore(process);
+  process.erase();
+  return success();
+}
+
 /// Evaluate a startup expression using the declaration initializer, rather than
 /// the signal's eventual register value. Only constant integer expressions and
 /// probes of this signal are supported; do not sample runtime inputs or guess
@@ -1328,6 +1377,8 @@ struct LowerLLHDFormalToCorePass
     SmallVector<ProcessOp> processes;
     module.walk([&](ProcessOp op) { processes.push_back(op); });
     for (auto process : processes) {
+      if (succeeded(unwrapConstantInitialProcess(process)))
+        continue;
       if (succeeded(unwrapPropertyProcess(process)))
         continue;
       if (failed(deseqFormal(process)))
