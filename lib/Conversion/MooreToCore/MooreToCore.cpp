@@ -3569,10 +3569,15 @@ static LogicalResult convert(SeverityBIOp op, SeverityBIOp::Adaptor adaptor,
   auto message = sim::FormatStringConcatOp::create(
       rewriter, op.getLoc(), ValueRange{prefix, adaptor.getMessage()});
   auto failure = op->getAttr("verif.assertion_failure");
+  bool isWarning = op.getSeverity() == Severity::Warning;
   auto print =
       rewriter.replaceOpWithNewOp<sim::PrintFormattedProcOp>(op, message);
   if (failure)
     print->setAttr("verif.assertion_failure", failure);
+  // Preserve warning provenance so formal lowering can discard the diagnostic
+  // without relying on its formatted message text.
+  if (isWarning)
+    print->setAttr("sim.warning", rewriter.getUnitAttr());
   return success();
 }
 

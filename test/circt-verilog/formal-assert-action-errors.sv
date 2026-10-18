@@ -2,6 +2,7 @@
 // RUN: not circt-verilog --lower-llhd-formal-to-core %t/standalone.sv 2>&1 | FileCheck %s
 // RUN: not circt-verilog --lower-llhd-formal-to-core %t/deferred.sv 2>&1 | FileCheck %s
 // RUN: not circt-verilog --lower-llhd-formal-to-core %t/conditional.sv 2>&1 | FileCheck %s
+// RUN: not circt-verilog --lower-llhd-formal-to-core %t/warning_text.sv 2>&1 | FileCheck %s
 // REQUIRES: slang
 // CHECK: error: unsupported operation in strict synchronous formal lowering
 
@@ -25,4 +26,10 @@ endmodule
 module top(input logic clk, enable, ok, print_enable);
   always @(posedge clk)
     if (enable) assert (ok) else if (print_enable) $error("Assertion failed");
+endmodule
+
+// Message text alone must not make an arbitrary print a warning diagnostic.
+//--- warning_text.sv
+module top(input logic clk);
+  always @(posedge clk) $display("Warning: not a warning task");
 endmodule
