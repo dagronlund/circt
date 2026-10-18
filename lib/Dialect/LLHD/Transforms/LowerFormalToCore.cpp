@@ -988,17 +988,22 @@ LogicalResult preflight(ModuleOp module, bool normalized = false,
   return failure(result.wasInterrupted());
 }
 
-/// An immediate assertion with an explicit $error action is represented by a
-/// diagnostic in its failure branch. Recover the check before rejecting Sim
-/// operations, then let cleanup remove the unused formatting and value probes.
-void recoverAssertionFailures(ModuleOp module) {
+/// Discard warning diagnostics and recover immediate assertions with explicit
+/// $error actions before rejecting Sim operations. Cleanup removes the unused
+/// formatting and value probes.
+void lowerFormalDiagnostics(ModuleOp module) {
   SmallVector<sim::PrintFormattedProcOp> diagnostics;
   module.walk([&](sim::PrintFormattedProcOp op) {
-    if (op->getAttrOfType<UnitAttr>("verif.assertion_failure") &&
+    if ((op->getAttrOfType<UnitAttr>("sim.warning") ||
+         op->getAttrOfType<UnitAttr>("verif.assertion_failure")) &&
         !op.getStream())
       diagnostics.push_back(op);
   });
   for (auto op : diagnostics) {
+    if (op->getAttrOfType<UnitAttr>("sim.warning")) {
+      op.erase();
+      continue;
+    }
     OpBuilder builder(op);
     Value condition =
         hw::ConstantOp::create(builder, op.getLoc(), builder.getI1Type(), 0);
@@ -1343,7 +1348,7 @@ struct LowerLLHDFormalToCorePass
   LogicalResult lower(ModuleOp module) {
     if (!maxMonitorDepth)
       return module.emitError("max-monitor-depth must be positive");
-    recoverAssertionFailures(module);
+    lowerFormalDiagnostics(module);
     // Resolve static procedural loops before SROA and driver validation. Their
     // induction variables may select independently driven packed slices.
     unrollFormalLoops(module);
