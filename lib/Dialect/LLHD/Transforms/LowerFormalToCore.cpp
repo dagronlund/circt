@@ -1239,6 +1239,40 @@ LogicalResult lowerTimeData(ModuleOp module) {
   return success();
 }
 
+/// Expose packed array lanes so truncations can discard unobserved storage
+/// after SROA reconstructs a probed aggregate from independently driven slices.
+struct FlattenPackedArrayCast : OpRewritePattern<hw::BitcastOp> {
+  FlattenPackedArrayCast(MLIRContext *context, unsigned &budget,
+                         bool &exhausted)
+      : OpRewritePattern(context), budget(budget), exhausted(exhausted) {}
+
+  LogicalResult matchAndRewrite(hw::BitcastOp op,
+                                PatternRewriter &rewriter) const override {
+    auto array = op.getInput().getDefiningOp<hw::ArrayCreateOp>();
+    if (!array || array.getInputs().empty() || !isa<IntegerType>(op.getType()))
+      return failure();
+    auto width = hw::getBitWidth(array.getInputs().front().getType());
+    if (width <= 0)
+      return failure();
+    unsigned cost = array.getNumOperands() + 1;
+    if (cost > budget) {
+      exhausted = true;
+      return rewriter.notifyMatchFailure(op, "packed cast expansion limit");
+    }
+    budget -= cost;
+    SmallVector<Value> lanes;
+    for (auto input : array.getInputs()) {
+      lanes.push_back(rewriter.createOrFold<hw::BitcastOp>(
+          op.getLoc(), rewriter.getIntegerType(width), input));
+    }
+    rewriter.replaceOpWithNewOp<comb::ConcatOp>(op, lanes);
+    return success();
+  }
+
+  unsigned &budget;
+  bool &exhausted;
+};
+
 /// Expose the lanes of packed bitwise wiring before whole-value dependency
 /// analysis. A full packed output may still be used, so width narrowing of the
 /// producer alone cannot eliminate dependencies on unrelated lanes.
@@ -1283,12 +1317,13 @@ struct DistributeExtractThroughOr : OpRewritePattern<comb::ExtractOp> {
 };
 
 LogicalResult normalizePackedSlices(ModuleOp module) {
-  // Bound duplication across shared OR trees. Only push slices towards inputs;
-  // do not include producer rewrites that could factor them back out and
+  // Bound expansion of aggregate casts and shared OR trees. Only expose lanes
+  // and push slices towards inputs; do not factor producers back out and
   // oscillate. A separate cleanup folds the exposed zero-padded lanes.
   unsigned budget = 65536;
   bool exhausted = false;
   RewritePatternSet patterns(module.getContext());
+  patterns.add<FlattenPackedArrayCast>(module.getContext(), budget, exhausted);
   patterns.add<DistributeExtractThroughOr>(module.getContext(), budget,
                                            exhausted);
   comb::ExtractOp::getCanonicalizationPatterns(patterns, module.getContext());
@@ -1541,9 +1576,10 @@ struct LowerLLHDFormalToCorePass
         block.front().moveBefore(op);
       op.erase();
     }
-    // Sensitivity-only probes of undriven aggregate slices are now dead. Reject
-    // any remaining undriven storage before signal promotion can use its init.
-    if (failed(cleanup(module)) || failed(preflight(module, true)))
+    // Expose truncations through packed casts before deciding which slices
+    // remain observable. Never fill a live undriven slice from its initializer.
+    if (failed(normalizePackedSlices(module)) || failed(cleanup(module)) ||
+        failed(preflight(module, true)))
       return failure();
     PassManager signals(&getContext());
     signals.addNestedPass<hw::HWModuleOp>(createSig2Reg());
