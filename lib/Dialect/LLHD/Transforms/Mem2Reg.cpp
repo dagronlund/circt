@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "FormalUtils.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
@@ -2121,4 +2122,8 @@ void Mem2RegPass::runOnOperation() {
   for (auto *region : regions)
     if (failed(Promoter(*region).promote()))
       return signalPassFailure();
+}
+
+LogicalResult circt::llhd::promoteFormalInitialProcess(ProcessOp op) {
+  return Promoter(op.getBody()).promote();
 }

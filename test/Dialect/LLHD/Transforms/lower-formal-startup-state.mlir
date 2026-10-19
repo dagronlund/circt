@@ -65,3 +65,50 @@ hw.module @runtime_input(in %clk: !seq.clock, in %data: i8, out q: i8) {
   llhd.drv %s, %reg after %time : i8
   hw.output %old : i8
 }
+
+// Unrolled blocking writes read the preceding update, in procedural order.
+// CHECK-LABEL: hw.module @sequential_startup
+// CHECK: [[Q:%.+]] = seq.firreg %data clock %clk preset 4 : i8
+// CHECK-NEXT: hw.output [[Q]] : i8
+hw.module @sequential_startup(in %clk: !seq.clock, in %data: i8, out q: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %three = hw.constant 3 : i8
+  %one = hw.constant 1 : i8
+  %two = hw.constant 2 : i8
+  %s = llhd.sig %three {llhd.explicit_init} : i8
+  llhd.process {
+    %first = llhd.prb %s : i8
+    %next = comb.xor %first, %one : i8
+    llhd.drv %s, %next after %time : i8
+    %second = llhd.prb %s : i8
+    %final = comb.add %second, %two : i8
+    llhd.drv %s, %final after %time : i8
+    llhd.halt
+  }
+  %reg = seq.firreg %data clock %clk preset 3 : i8
+  llhd.drv %s, %reg after %time : i8
+  %q = llhd.prb %s : i8
+  hw.output %q : i8
+}
+
+// Ordinary promotion can yield a drive-enable result, which must be proven
+// true before the startup assignment can be absorbed.
+// CHECK-LABEL: hw.module @startup_enable_result
+// CHECK: [[Q:%.+]] = seq.firreg %data clock %clk preset 2 : i8
+// CHECK-NEXT: hw.output [[Q]] : i8
+hw.module @startup_enable_result(in %clk: !seq.clock, in %data: i8, out q: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %three = hw.constant 3 : i8
+  %one = hw.constant 1 : i8
+  %true = hw.constant true
+  %s = llhd.sig %three {llhd.explicit_init} : i8
+  %old = llhd.prb %s : i8
+  %startup:2 = llhd.process -> i8, i1 {
+    %next = comb.xor %old, %one : i8
+    llhd.halt %next, %true : i8, i1
+  }
+  llhd.drv %s, %startup#0 after %time if %startup#1 : i8
+  %reg = seq.firreg %data clock %clk preset 3 : i8
+  llhd.drv %s, %reg after %time : i8
+  hw.output %old : i8
+}

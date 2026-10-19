@@ -27,6 +27,8 @@ void removeFormalControlFlow(CombinationalOp op);
 mlir::LogicalResult deseqFormal(ProcessOp op);
 void hoistFormalSignals(mlir::Operation *op);
 void unrollFormalLoops(mlir::Operation *op);
+/// Forward sequential blocking writes in a validated startup process.
+mlir::LogicalResult promoteFormalInitialProcess(ProcessOp op);
 /// Constrain state to an input-dependent startup value until its first edge.
 void constrainFormalInitialState(mlir::OpBuilder &builder, mlir::Location loc,
                                  mlir::Value state, mlir::Value clock,
