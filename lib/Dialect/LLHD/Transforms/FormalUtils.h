@@ -27,6 +27,10 @@ void removeFormalControlFlow(CombinationalOp op);
 mlir::LogicalResult deseqFormal(ProcessOp op);
 void hoistFormalSignals(mlir::Operation *op);
 void unrollFormalLoops(mlir::Operation *op);
+/// Constrain state to an input-dependent startup value until its first edge.
+void constrainFormalInitialState(mlir::OpBuilder &builder, mlir::Location loc,
+                                 mlir::Value state, mlir::Value clock,
+                                 mlir::Value initial, mlir::Value reset = {});
 } // namespace circt::llhd
 
 #endif // CIRCT_DIALECT_LLHD_TRANSFORMS_FORMALUTILS_H
