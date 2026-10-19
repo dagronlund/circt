@@ -182,6 +182,17 @@ void CFRemover::run() {
   // detect a control flow cycle. Also take note of all YieldOps, such that we
   // can combine them into a single yield block later.
   SmallVector<YieldOp, 2> yieldOps;
+  Block *driveExit = nullptr;
+  if (formal) {
+    for (auto &block : region)
+      if (isa<YieldOp>(block.getTerminator())) {
+        if (driveExit) {
+          driveExit = nullptr;
+          break;
+        }
+        driveExit = &block;
+      }
+  }
   SmallPtrSet<Block *, 8> visitedBlocks, ipoSet;
   for (auto &block : region) {
     for (auto *ipoBlock : llvm::inverse_post_order_ext(&block, ipoSet)) {
@@ -195,9 +206,12 @@ void CFRemover::run() {
       sortedBlocks.push_back(ipoBlock);
     }
 
-    // Give up if there are any side-effecting ops in the region.
+    // Mem2Reg may leave drives in the sole exit block. In an acyclic region,
+    // every path reaches that block, so moving its drives needs no predication.
+    // Give up on other side effects apart from explicitly predicated checks.
     for (auto &op : block) {
-      if (!isMemoryEffectFree(&op) && !(formal && isFormalCheck(&op))) {
+      if (!isMemoryEffectFree(&op) && !(formal && isFormalCheck(&op)) &&
+          !(&block == driveExit && isa<DriveOp>(op))) {
         LLVM_DEBUG(llvm::dbgs() << "- Has side effects, giving up\n");
         return;
       }

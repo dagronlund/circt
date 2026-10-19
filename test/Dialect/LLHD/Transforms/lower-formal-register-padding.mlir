@@ -90,3 +90,53 @@ hw.module @enabled_packed_padding(in %clk: !seq.clock, in %en: i1, in %low: i3, 
   %q = comb.extract %value from 3 : (i8) -> i5
   hw.output %q : i5
 }
+
+// No signal projections survive ordinary extraction. Recover the wider packed
+// lane boundaries from the concatenations, without splitting every bit.
+// CHECK-LABEL: hw.module @whole_packed_drives
+// CHECK-DAG: [[LOW:%.+]] = seq.firreg %low clock %clk {test.tag = "low"} : i3
+// CHECK-DAG: [[HIGH:%.+]] = seq.firreg %high clock %clk {test.tag = "high"} : i5
+// CHECK-DAG: [[Q:%.+]] = comb.concat [[HIGH]], [[LOW]] : i5, i3
+// CHECK: hw.output [[Q]] : i8
+hw.module @whole_packed_drives(in %clk: !seq.clock, in %low: i3, in %high: i5, out q: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.constant 0 : i8
+  %s = llhd.sig %zero {llhd.unconstrained} : i8
+  %old = llhd.prb %s : i8
+  %old_low = comb.extract %old from 0 : (i8) -> i3
+  %old_high = comb.extract %old from 3 : (i8) -> i5
+  %low_next = comb.concat %old_high, %low : i5, i3
+  %high_next = comb.concat %high, %old_low : i5, i3
+  %low_reg = seq.firreg %low_next clock %clk {test.tag = "low"} : i8
+  %high_reg = seq.firreg %high_next clock %clk {test.tag = "high"} : i8
+  llhd.drv %s, %low_reg after %time : i8
+  llhd.drv %s, %high_reg after %time : i8
+  hw.output %old : i8
+}
+
+// Enabled updates hide the concatenations behind self-feedback muxes. Keep
+// each lane's enable, attributes, and unconstrained initial state.
+// CHECK-LABEL: hw.module @enabled_whole_packed_drives
+// CHECK-DAG: [[LOW:%.+]] = seq.firreg [[LOW_NEXT:%.+]] clock %clk {test.tag = "low"} : i3
+// CHECK-DAG: [[LOW_NEXT]] = comb.mux bin %enable_low, %low, [[LOW]] : i3
+// CHECK-DAG: [[HIGH:%.+]] = seq.firreg [[HIGH_NEXT:%.+]] clock %clk {test.tag = "high"} : i5
+// CHECK-DAG: [[HIGH_NEXT]] = comb.mux %enable_high, %high, [[HIGH]] : i5
+// CHECK-DAG: [[Q:%.+]] = comb.concat [[HIGH]], [[LOW]] : i5, i3
+// CHECK: hw.output [[Q]] : i8
+hw.module @enabled_whole_packed_drives(in %clk: !seq.clock, in %enable_low: i1, in %enable_high: i1, in %low: i3, in %high: i5, out q: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.constant 0 : i8
+  %s = llhd.sig %zero {llhd.unconstrained} : i8
+  %old = llhd.prb %s : i8
+  %old_low = comb.extract %old from 0 : (i8) -> i3
+  %old_high = comb.extract %old from 3 : (i8) -> i5
+  %low_update = comb.concat %old_high, %low : i5, i3
+  %high_update = comb.concat %high, %old_low : i5, i3
+  %low_next = comb.mux bin %enable_low, %low_update, %low_reg : i8
+  %high_next = comb.mux %enable_high, %high_update, %high_reg : i8
+  %low_reg = seq.firreg %low_next clock %clk {test.tag = "low"} : i8
+  %high_reg = seq.firreg %high_next clock %clk {test.tag = "high"} : i8
+  llhd.drv %s, %low_reg after %time : i8
+  llhd.drv %s, %high_reg after %time : i8
+  hw.output %old : i8
+}

@@ -727,17 +727,45 @@ void normalizeArrayDrives(ModuleOp module) {
   }
 }
 
-/// Register extraction can hide every partial array access behind whole-array
-/// registers and drives. Expose the lanes of multiply driven array signals so
+/// Find packed lane boundaries hidden by register extraction. Follow mux arms
+/// as well as concatenations so enabled updates retain their original lanes.
+SmallVector<unsigned> getPackedLaneBoundaries(Value value) {
+  SmallVector<unsigned> boundaries{0, value.getType().getIntOrFloatBitWidth()};
+  SmallVector<std::pair<Value, unsigned>> worklist{{value, 0}};
+  DenseSet<std::pair<Value, unsigned>> visited;
+  while (!worklist.empty()) {
+    auto [input, offset] = worklist.pop_back_val();
+    if (!visited.insert({input, offset}).second)
+      continue;
+    if (auto concat = input.getDefiningOp<comb::ConcatOp>()) {
+      for (auto lane : llvm::reverse(concat.getInputs())) {
+        boundaries.push_back(offset);
+        worklist.emplace_back(lane, offset);
+        offset += lane.getType().getIntOrFloatBitWidth();
+      }
+    } else if (auto mux = input.getDefiningOp<comb::MuxOp>()) {
+      worklist.emplace_back(mux.getTrueValue(), offset);
+      worklist.emplace_back(mux.getFalseValue(), offset);
+    }
+  }
+  llvm::sort(boundaries);
+  boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
+                   boundaries.end());
+  return boundaries;
+}
+
+/// Register extraction can hide every partial access behind whole-signal
+/// registers and drives. Expose the lanes of multiply driven signals so
 /// SROA can split their storage and normalizeRegisterDrives can distinguish
 /// actual updates from registered passthrough lanes.
-void splitArrayRegisterDrives(ModuleOp module) {
+void splitRegisterDrives(ModuleOp module) {
   SmallVector<DriveOp> drives;
   module.walk([&](DriveOp op) { drives.push_back(op); });
   for (auto drive : drives) {
-    auto type = dyn_cast<hw::ArrayType>(drive.getValue().getType());
-    if (!type || !isa<hw::HWModuleOp>(drive->getParentOp()) ||
-        !drive.getValue().getDefiningOp<seq::FirRegOp>() ||
+    auto type = drive.getValue().getType();
+    auto reg = drive.getValue().getDefiningOp<seq::FirRegOp>();
+    if (!isa<IntegerType, hw::ArrayType>(type) ||
+        !isa<hw::HWModuleOp>(drive->getParentOp()) || !reg ||
         !drive.getSignal().getDefiningOp<SignalOp>() ||
         !llvm::any_of(drive.getSignal().getUsers(), [&](Operation *user) {
           auto other = dyn_cast<DriveOp>(user);
@@ -747,9 +775,35 @@ void splitArrayRegisterDrives(ModuleOp module) {
       continue;
 
     OpBuilder builder(drive);
+    if (auto intType = dyn_cast<IntegerType>(type)) {
+      auto boundaries = getPackedLaneBoundaries(reg.getNext());
+      if (boundaries.size() <= 2)
+        continue;
+      auto indexType = builder.getIntegerType(
+          std::max(1u, llvm::Log2_64_Ceil(intType.getWidth())));
+      for (unsigned i = 1; i < boundaries.size(); ++i) {
+        unsigned low = boundaries[i - 1];
+        unsigned width = boundaries[i] - low;
+        Value index =
+            hw::ConstantOp::create(builder, drive.getLoc(), indexType, low);
+        Value target =
+            SigExtractOp::create(builder, drive.getLoc(),
+                                 RefType::get(builder.getIntegerType(width)),
+                                 drive.getSignal(), index);
+        Value value = comb::ExtractOp::create(builder, drive.getLoc(),
+                                              drive.getValue(), low, width);
+        IRMapping mapping;
+        mapping.map(drive.getSignal(), target);
+        mapping.map(drive.getValue(), value);
+        builder.clone(*drive, mapping);
+      }
+      drive.erase();
+      continue;
+    }
+    auto arrayType = cast<hw::ArrayType>(type);
     auto indexType = builder.getIntegerType(
-        std::max(1u, llvm::Log2_64_Ceil(type.getNumElements())));
-    for (uint64_t i = 0, e = type.getNumElements(); i < e; ++i) {
+        std::max(1u, llvm::Log2_64_Ceil(arrayType.getNumElements())));
+    for (uint64_t i = 0, e = arrayType.getNumElements(); i < e; ++i) {
       Value index =
           hw::ConstantOp::create(builder, drive.getLoc(), indexType, i);
       Value target = SigArrayGetOp::create(builder, drive.getLoc(),
@@ -947,8 +1001,12 @@ LogicalResult preflight(ModuleOp module, bool normalized = false,
       while (!worklist.empty()) {
         for (auto *user : worklist.pop_back_val().getUsers()) {
           if (isa<DriveOp>(user)) {
-            auto process = user->getParentOfType<ProcessOp>();
-            drivers.insert(process ? process.getOperation() : user);
+            // Assignments along a region's control-flow paths share one
+            // procedural driver, before and after process lowering.
+            auto *owner = user->getParentOp();
+            while (owner && !isa<ProcessOp, CombinationalOp>(owner))
+              owner = owner->getParentOp();
+            drivers.insert(owner ? owner : user);
           } else if (!normalized &&
                      isa<SigArrayGetOp, SigArraySliceOp, SigExtractOp,
                          SigStructExtractOp>(user)) {
@@ -1357,7 +1415,7 @@ struct LowerLLHDFormalToCorePass
     normalizeConstantInitialState(module);
     normalizeInitialState(module);
     normalizeArrayDrives(module);
-    splitArrayRegisterDrives(module);
+    splitRegisterDrives(module);
     // Independent aggregate elements may have different drivers, including a
     // mix of combinational and clocked assignments. Split these before checking
     // driver ownership or promoting partial writes to whole-signal updates.

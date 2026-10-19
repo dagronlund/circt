@@ -273,3 +273,30 @@ hw.module @negative_delay(in %clk: i1, in %a: i1) {
   verif.clocked_assert %p, posedge %clk : !ltl.sequence
   hw.output
 }
+
+// -----
+
+// Separate combinational regions remain independent drivers even when their
+// control-flow paths are mutually exclusive.
+hw.module @combinational_multidriver(in %sel: i1, in %a: i1, in %b: i1) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %a : i1
+  llhd.combinational {
+    cf.cond_br %sel, ^bb1, ^bb2
+  ^bb1:
+    llhd.drv %s, %a after %time : i1
+    cf.br ^bb2
+  ^bb2:
+    llhd.yield
+  }
+  llhd.combinational {
+    cf.cond_br %sel, ^bb2, ^bb1
+  ^bb1:
+    llhd.drv %s, %b after %time : i1
+    cf.br ^bb2
+  ^bb2:
+    llhd.yield
+  }
+  hw.output
+}
