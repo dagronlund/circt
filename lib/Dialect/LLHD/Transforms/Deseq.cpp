@@ -405,7 +405,14 @@ void Deseq::deseq() {
       if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>()) {
         IntegerAttr init;
         auto *initOp = signal.getInit().getDefiningOp();
+        if (signal->hasAttr("llhd.symbolic_init") && drive.clock.bothEdges) {
+          signal.emitError("input-dependent startup with dual-edge state is "
+                           "unsupported");
+          emittedError = true;
+          return;
+        }
         if (!signal->hasAttr("llhd.unconstrained") &&
+            !signal->hasAttr("llhd.symbolic_init") &&
             !matchPattern(signal.getInit(), m_Constant(&init)) &&
             !(initOp && initOp->getName().getStringRef() == "ub.poison")) {
           signal.emitError(
@@ -1579,6 +1586,11 @@ void Deseq::implementRegister(DriveInfo &drive) {
                                    hw::InnerSymAttr{},
                                    /*preset=*/preset, reset, resetValue,
                                    /*isAsync=*/reset != Value{});
+  if (formal)
+    if (auto signal = drive.op.getSignal().getDefiningOp<SignalOp>();
+        signal && signal->hasAttr("llhd.symbolic_init"))
+      constrainFormalInitialState(builder, loc, reg, clock, signal.getInit(),
+                                  reset);
 
   // If the register has an enable, insert a self-mux in front of the register.
   // Set the `bin` flag on the mux specifically to make up for a subtle
@@ -1981,4 +1993,23 @@ LogicalResult circt::llhd::deseqFormal(ProcessOp op) {
   Deseq deseq(op, true);
   deseq.deseq();
   return failure(deseq.emittedError);
+}
+
+void circt::llhd::constrainFormalInitialState(OpBuilder &builder, Location loc,
+                                              Value state, Value clock,
+                                              Value initial, Value reset) {
+  Value zero = hw::ConstantOp::create(builder, loc, builder.getI1Type(), 0);
+  Value startup = seq::FirRegOp::create(
+      builder, loc, zero, clock, builder.getStringAttr(""), hw::InnerSymAttr{},
+      builder.getBoolAttr(true));
+  // An asynchronous reset already overrides the initial state. Later resets
+  // must not reactivate the one-shot startup constraint.
+  if (reset)
+    startup = comb::AndOp::create(builder, loc, startup,
+                                  comb::createOrFoldNot(builder, loc, reset));
+  Value equal = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::eq,
+                                     state, initial);
+  Value inactive = comb::createOrFoldNot(builder, loc, startup);
+  Value constraint = comb::OrOp::create(builder, loc, inactive, equal);
+  verif::AssumeOp::create(builder, loc, constraint, Value{}, StringAttr{});
 }

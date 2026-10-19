@@ -391,48 +391,69 @@ LogicalResult unwrapConstantInitialProcess(ProcessOp process) {
   return success();
 }
 
-/// Evaluate a startup expression using the declaration initializer, rather than
-/// the signal's eventual register value. Only constant integer expressions and
-/// probes of this signal are supported; do not sample runtime inputs or guess
-/// an execution order between independent startup processes.
+/// Rematerialize a startup expression using the declaration value and module
+/// inputs. Other state probes are deliberately excluded: independent initial
+/// processes have no defined execution order.
 struct InitialValueEvaluator {
-  InitialValueEvaluator(SignalOp signal, IntegerAttr initial)
-      : signal(signal), initial(initial) {}
+  InitialValueEvaluator(SignalOp signal, IntegerAttr initial,
+                        OpBuilder &builder)
+      : signal(signal), initial(initial), builder(builder) {}
 
-  IntegerAttr evaluate(Value value, unsigned depth = 0) {
+  Value evaluate(Value value, unsigned depth = 0) {
     if (auto it = cache.find(value); it != cache.end())
       return it->second;
     if (depth == 64 || !active.insert(value).second)
       return {};
     auto done = llvm::scope_exit([&] { active.erase(value); });
-    IntegerAttr result;
-    if (matchPattern(value, m_Constant(&result)))
-      return result;
-    if (auto probe = value.getDefiningOp<ProbeOp>()) {
-      if (probe.getSignal() == signal.getResult())
-        result = initial;
+    Value result;
+    if (auto arg = dyn_cast<BlockArgument>(value)) {
+      if (arg.getOwner() == signal->getBlock())
+        result = arg;
+    } else if (auto probe = value.getDefiningOp<ProbeOp>()) {
+      if (probe.getSignal() == signal.getResult()) {
+        result = hw::ConstantOp::create(builder, probe.getLoc(), initial);
+      } else if (auto input = probe.getSignal().getDefiningOp<SignalOp>();
+                 input && input->getBlock() == signal->getBlock() &&
+                 !input->hasAttr("llhd.explicit_init")) {
+        DriveOp driver;
+        for (auto *user : input->getUsers()) {
+          if (isa<ProbeOp>(user))
+            continue;
+          auto drive = dyn_cast<DriveOp>(user);
+          if (!drive || driver)
+            return {};
+          driver = drive;
+        }
+        TimeAttr time;
+        auto arg = driver ? dyn_cast<BlockArgument>(driver.getValue())
+                          : BlockArgument{};
+        if (arg && arg.getOwner() == signal->getBlock() &&
+            driver->getBlock() == signal->getBlock() && !driver.getEnable() &&
+            matchPattern(driver.getTime(), m_Constant(&time)) &&
+            time.getTime() == 0 && time.getDelta() == 0 &&
+            time.getEpsilon() == 1)
+          result = arg;
+      }
     } else if (auto *op = value.getDefiningOp();
                op && isMemoryEffectFree(op) && !op->getNumRegions() &&
                op->getNumResults() == 1 && isa<IntegerType>(value.getType()) &&
-               (op->getName().getDialectNamespace() == "comb" ||
-                op->getName().getDialectNamespace() == "hw" ||
+               (isa<hw::ConstantOp>(op) ||
+                op->getName().getDialectNamespace() == "comb" ||
                 op->getName().getDialectNamespace() == "arith")) {
-      SmallVector<Attribute> operands;
-      for (auto input : op->getOperands()) {
-        auto constant = evaluate(input, depth + 1);
-        if (!constant)
+      IRMapping mapping;
+      for (auto operand : op->getOperands()) {
+        auto mapped = evaluate(operand, depth + 1);
+        if (!mapped)
           return {};
-        operands.push_back(constant);
+        mapping.map(operand, mapped);
       }
-      // Fold a clone because folding may modify operands or attributes in
-      // place. The evaluated constants need not be the runtime operands.
-      OwningOpRef<Operation *> copy(op->clone());
-      SmallVector<OpFoldResult> folded;
-      if (succeeded(copy->fold(operands, folded)) && folded.size() == 1) {
-        if (auto attr = dyn_cast<Attribute>(folded.front()))
-          result = dyn_cast<IntegerAttr>(attr);
-        else if (auto foldedValue = dyn_cast<Value>(folded.front()))
-          result = evaluate(foldedValue, depth + 1);
+      auto *copy = builder.clone(*op, mapping);
+      SmallVector<Value, 1> folded;
+      if (succeeded(builder.tryFold(copy, folded)) && !folded.empty()) {
+        result = folded.front();
+        copy->erase();
+      } else {
+        result = copy->getResult(0);
       }
     }
     cache[value] = result;
@@ -441,7 +462,8 @@ struct InitialValueEvaluator {
 
   SignalOp signal;
   IntegerAttr initial;
-  DenseMap<Value, IntegerAttr> cache;
+  OpBuilder &builder;
+  DenseMap<Value, Value> cache;
   DenseSet<Value> active;
 };
 
@@ -528,7 +550,7 @@ void normalizeConstantInitialState(ModuleOp module) {
   }
 }
 
-/// A single constant blocking startup assignment refines a scalar declaration
+/// A single blocking startup assignment refines a scalar declaration
 /// initializer. Recognize both raw processes and the result/drive pair left by
 /// ordinary Mem2Reg. Require exactly one other, clocked driver so startup races
 /// and genuine multiple drivers remain errors.
@@ -591,14 +613,25 @@ void normalizeInitialState(ModuleOp module) {
     }
     Value expression = process.getNumResults() ? halt.getYieldOperands()[0]
                                                : startup.getValue();
-    auto value = InitialValueEvaluator(signal, initial).evaluate(expression);
+    OpBuilder builder(signal);
+    auto value =
+        InitialValueEvaluator(signal, initial, builder).evaluate(expression);
     if (!value || value.getType() != initial.getType())
       continue;
-    OpBuilder builder(signal);
-    signal.getInitMutable().assign(
-        hw::ConstantOp::create(builder, signal.getLoc(), value));
-    if (reg)
-      reg.setPresetAttr(value);
+    signal.getInitMutable().assign(value);
+    IntegerAttr constant;
+    if (matchPattern(value, m_Constant(&constant))) {
+      if (reg)
+        reg.setPresetAttr(constant);
+    } else if (reg) {
+      reg.removePresetAttr();
+      constrainFormalInitialState(builder, signal.getLoc(), reg, reg.getClk(),
+                                  value,
+                                  reg.getIsAsync() ? reg.getReset() : Value{});
+    } else {
+      // Formal extraction will supply the clock for the startup constraint.
+      signal->setAttr("llhd.symbolic_init", builder.getUnitAttr());
+    }
     startup.erase();
     process.erase();
   }

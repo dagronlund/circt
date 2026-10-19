@@ -38,3 +38,30 @@ hw.module @constant_startup(in %clk: !seq.clock, in %data: i8, out q: i8) {
   %q = llhd.prb %s : i8
   hw.output %q : i8
 }
+
+// Input-dependent startup is an initial constraint, not a constant preset.
+// CHECK-LABEL: hw.module @runtime_input
+// CHECK-DAG: [[ONE:%.+]] = hw.constant 1 : i8
+// CHECK-DAG: [[ZERO:%.+]] = hw.constant false
+// CHECK-DAG: [[INITIAL:%.+]] = comb.xor %data, [[ONE]] : i8
+// CHECK-DAG: [[Q:%.+]] = seq.firreg %data clock %clk : i8
+// CHECK-DAG: [[ACTIVE:%.+]] = seq.firreg [[ZERO]] clock %clk preset 1 : i1
+// CHECK-DAG: [[EQUAL:%.+]] = comb.icmp eq [[Q]], [[INITIAL]] : i8
+// CHECK-DAG: [[INACTIVE:%.+]] = comb.xor [[ACTIVE]], {{%.+}} : i1
+// CHECK-DAG: [[CONSTRAINT:%.+]] = comb.or [[INACTIVE]], [[EQUAL]] : i1
+// CHECK-DAG: verif.assume [[CONSTRAINT]] : i1
+// CHECK: hw.output [[Q]] : i8
+hw.module @runtime_input(in %clk: !seq.clock, in %data: i8, out q: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %one = hw.constant 1 : i8
+  %s = llhd.sig %one {llhd.explicit_init} : i8
+  %old = llhd.prb %s : i8
+  %startup = llhd.process -> i8 {
+    %next = comb.xor %old, %data : i8
+    llhd.halt %next : i8
+  }
+  llhd.drv %s, %startup after %time : i8
+  %reg = seq.firreg %data clock %clk preset 1 : i8
+  llhd.drv %s, %reg after %time : i8
+  hw.output %old : i8
+}

@@ -1,24 +1,5 @@
 // RUN: circt-opt %s --lower-llhd-formal-to-core --split-input-file --verify-diagnostics
 
-// Runtime inputs cannot be sampled as constants during startup normalization.
-hw.module @runtime_input(in %clk: !seq.clock, in %data: i8) {
-  %time = llhd.constant_time <0ns, 0d, 1e>
-  %one = hw.constant 1 : i8
-  // expected-error @+1 {{signal must have exactly one resolved driver}}
-  %s = llhd.sig %one {llhd.explicit_init} : i8
-  %old = llhd.prb %s : i8
-  %startup = llhd.process -> i8 {
-    %next = comb.xor %old, %data : i8
-    llhd.halt %next : i8
-  }
-  llhd.drv %s, %startup after %time : i8
-  %reg = seq.firreg %data clock %clk preset 1 : i8
-  llhd.drv %s, %reg after %time : i8
-  hw.output
-}
-
-// -----
-
 // Two startup writers have no defined execution order. Do not pick an order.
 hw.module @startup_race(in %clk: !seq.clock, in %data: i8) {
   %time = llhd.constant_time <0ns, 0d, 1e>
@@ -130,6 +111,28 @@ hw.module @marked_startup_race(in %clk: !seq.clock, in %data: i8) {
   llhd.drv %s, %one after %time {llhd.initial} : i8
   llhd.drv %s, %two after %time {llhd.initial} : i8
   %reg = seq.firreg %data clock %clk : i8
+  llhd.drv %s, %reg after %time : i8
+  hw.output
+}
+
+// -----
+
+// Another signal's startup value cannot be read in an assumed process order.
+hw.module @other_state(in %clk: !seq.clock, in %data: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %one = hw.constant 1 : i8
+  %other = llhd.sig %one {llhd.explicit_init} : i8
+  llhd.drv %other, %data after %time : i8
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %one {llhd.explicit_init} : i8
+  %old = llhd.prb %s : i8
+  %other_value = llhd.prb %other : i8
+  %startup = llhd.process -> i8 {
+    %next = comb.xor %old, %other_value : i8
+    llhd.halt %next : i8
+  }
+  llhd.drv %s, %startup after %time : i8
+  %reg = seq.firreg %data clock %clk preset 1 : i8
   llhd.drv %s, %reg after %time : i8
   hw.output
 }
