@@ -136,3 +136,43 @@ hw.module @other_state(in %clk: !seq.clock, in %data: i8) {
   llhd.drv %s, %reg after %time : i8
   hw.output
 }
+
+// -----
+
+// A runtime-dependent startup enable must not become an unconditional preset.
+hw.module @conditional_startup(in %clk: !seq.clock, in %data: i8, in %enable: i1) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %one = hw.constant 1 : i8
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %one {llhd.explicit_init} : i8
+  %old = llhd.prb %s : i8
+  %startup:2 = llhd.process -> i8, i1 {
+    %next = comb.xor %old, %one : i8
+    llhd.halt %next, %enable : i8, i1
+  }
+  llhd.drv %s, %startup#0 after %time if %startup#1 : i8
+  %reg = seq.firreg %data clock %clk preset 1 : i8
+  llhd.drv %s, %reg after %time : i8
+  hw.output
+}
+
+// -----
+
+// Forwarding blocking startup writes must not absorb a nonblocking write.
+hw.module @mixed_startup_delays(in %clk: !seq.clock, in %data: i8) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %nba = llhd.constant_time <0ns, 1d, 0e>
+  %one = hw.constant 1 : i8
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %one {llhd.explicit_init} : i8
+  llhd.process {
+    llhd.drv %s, %data after %nba : i8
+    %old = llhd.prb %s : i8
+    %next = comb.xor %old, %one : i8
+    llhd.drv %s, %next after %time : i8
+    llhd.halt
+  }
+  %reg = seq.firreg %data clock %clk preset 1 : i8
+  llhd.drv %s, %reg after %time : i8
+  hw.output
+}

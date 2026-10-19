@@ -550,28 +550,33 @@ void normalizeConstantInitialState(ModuleOp module) {
   }
 }
 
-/// A single blocking startup assignment refines a scalar declaration
+/// Blocking startup assignments refine a scalar declaration
 /// initializer. Recognize both raw processes and the result/drive pair left by
 /// ordinary Mem2Reg. Require exactly one other, clocked driver so startup races
 /// and genuine multiple drivers remain errors.
-void normalizeInitialState(ModuleOp module) {
+LogicalResult normalizeInitialState(ModuleOp module) {
   SmallVector<ProcessOp> processes;
   module.walk([&](ProcessOp op) { processes.push_back(op); });
   for (auto process : processes) {
     if (!process.getBody().hasOneBlock())
       continue;
     auto halt = dyn_cast<HaltOp>(process.getBody().front().getTerminator());
-    if (!halt || process.getNumResults() > 1)
+    if (!halt || process.getNumResults() > 2 ||
+        (process.getNumResults() == 2 &&
+         !matchPattern(halt.getYieldOperands()[1], m_One())))
       continue;
     DriveOp startup;
+    SmallVector<DriveOp> startupDrives;
     bool supported = true;
     for (auto &op : process.getBody().front().without_terminator()) {
       if (auto drive = dyn_cast<DriveOp>(&op)) {
-        if (startup || process.getNumResults()) {
+        if (process.getNumResults() ||
+            (startup && startup.getSignal() != drive.getSignal())) {
           supported = false;
           break;
         }
         startup = drive;
+        startupDrives.push_back(drive);
       } else if (!isa<ProbeOp>(op) &&
                  (!isMemoryEffectFree(&op) || op.getNumRegions() ||
                   (op.getName().getDialectNamespace() != "comb" &&
@@ -583,16 +588,20 @@ void normalizeInitialState(ModuleOp module) {
     }
     if (!supported)
       continue;
-    if (process.getNumResults() == 1) {
+    if (process.getNumResults()) {
       if (!process.getResult(0).hasOneUse())
         continue;
       startup = dyn_cast<DriveOp>(*process.getResult(0).getUsers().begin());
       if (!startup || startup.getValue() != process.getResult(0) ||
           startup->getParentOp() != process->getParentOp())
         continue;
+      if (process.getNumResults() == 2 &&
+          (!process.getResult(1).hasOneUse() ||
+           startup.getEnable() != process.getResult(1)))
+        continue;
     }
     TimeAttr time;
-    if (!startup || startup.getEnable() ||
+    if (!startup || (startup.getEnable() && process.getNumResults() != 2) ||
         !matchPattern(startup.getTime(), m_Constant(&time)) ||
         time.getTime() != 0 || time.getDelta() != 0 || time.getEpsilon() != 1)
       continue;
@@ -603,6 +612,20 @@ void normalizeInitialState(ModuleOp module) {
         signal->hasAttr("llhd.unconstrained") ||
         !matchPattern(signal.getInit(), m_Constant(&initial)))
       continue;
+    if (startupDrives.size() > 1) {
+      // Unrolling leaves separate blocking writes. Forward their values in
+      // procedural order before evaluating the final startup expression.
+      if (!llvm::all_of(startupDrives, [&](DriveOp drive) {
+            return !drive.getEnable() && drive.getTime() == startup.getTime();
+          }))
+        continue;
+      if (failed(promoteFormalInitialProcess(process)))
+        return failure();
+      auto drives = process.getBody().front().getOps<DriveOp>();
+      if (!llvm::hasSingleElement(drives))
+        continue;
+      startup = *drives.begin();
+    }
     auto clocked = getClockedDriver(signal, startup);
     if (!clocked)
       continue;
@@ -635,6 +658,7 @@ void normalizeInitialState(ModuleOp module) {
     startup.erase();
     process.erase();
   }
+  return success();
 }
 
 /// Find an unchanged packed lane through concatenations and nested extracts.
@@ -1446,7 +1470,8 @@ struct LowerLLHDFormalToCorePass
     if (failed(cleanup(module)))
       return failure();
     normalizeConstantInitialState(module);
-    normalizeInitialState(module);
+    if (failed(normalizeInitialState(module)))
+      return failure();
     normalizeArrayDrives(module);
     splitRegisterDrives(module);
     // Independent aggregate elements may have different drivers, including a
