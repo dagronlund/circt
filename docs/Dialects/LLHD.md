@@ -50,12 +50,12 @@ SSA values preserve statement order and merge values with muxes. Verification
 operations retain their global effect classification.
 
 Conversion is transactional. Successful output contains only HW, Seq, Comb,
-builtin containers, and the six Boolean assert/assume/cover operations including
-their clocked variants. Unsupported effects, procedural/temporal constructs,
-types, drivers, or combinational dependency cycles fail instead of leaving a
-partially lowered design. Module output dependency summaries preserve register
-boundaries across instances. This pass does not require or run
-`comb-assume-two-valued`; callers choose their handling of X/Z semantics.
+builtin containers, `verif.symbolic_value`, and the six Boolean assert/assume/cover
+operations including their clocked variants. Unsupported effects,
+procedural/temporal constructs, types, drivers, or combinational dependency cycles
+fail instead of leaving a partially lowered design. Module output dependency
+summaries preserve register boundaries across instances. This pass does not
+require or run `comb-assume-two-valued`; callers choose their handling of X/Z semantics.
 
 Single-edge sequential processes extract registers and immediate checks from
 the same edge-specialized SSA computation. Checks observe current state before
