@@ -17,8 +17,9 @@ def LowerLLHDFormalToCorePass : Pass<"lower-llhd-formal-to-core", "ModuleOp"> {
     Converts acyclic combinational checks and recognizable edge-triggered LLHD
     processes under a synchronous two-state sampling model. Lowers fixed finite
     temporal monitors, preserving asynchronous cancellation and initial state.
-    Successful output contains only HW, Seq, Comb and Boolean assert/assume/cover
-    operations (including their clocked variants). Unsupported constructs fail.
+    Successful output contains only HW, Seq, Comb, symbolic values and Boolean
+    assert/assume/cover operations (including their clocked variants). Unsupported
+    constructs fail.
     Pending finite obligations are retained as state at a bounded trace's end;
     this pass does not impose a strong end-of-trace failure policy.
   }];

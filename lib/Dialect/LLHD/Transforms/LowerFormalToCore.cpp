@@ -1025,7 +1025,8 @@ LogicalResult preflight(ModuleOp module, bool normalized = false,
       }
     }
 
-    if (dialect == "verif" && !isFormalCheck(op)) {
+    if (dialect == "verif" && !isFormalCheck(op) &&
+        !isa<verif::SymbolicValueOp>(op)) {
       op->emitError(
           "unsupported verification effect in strict formal lowering");
       return WalkResult::interrupt();
@@ -1370,8 +1371,8 @@ LogicalResult verifyCore(ModuleOp module) {
       return WalkResult::interrupt();
     }
 
-    if (isa<ModuleOp>(op) || dialect == "hw" || dialect == "seq" ||
-        dialect == "comb")
+    if (isa<ModuleOp, verif::SymbolicValueOp>(op) || dialect == "hw" ||
+        dialect == "seq" || dialect == "comb")
       return WalkResult::advance();
     if (isFormalCheck(op)) {
       if (!op->getOperand(0).getType().isSignlessInteger(1)) {
