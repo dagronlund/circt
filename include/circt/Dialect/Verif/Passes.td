@@ -15,6 +15,30 @@
 
 include "mlir/Pass/PassBase.td"
 
+def AbstractRandomPass : Pass<"verif-abstract-random", "mlir::ModuleOp"> {
+  let summary = "Abstract SystemVerilog random calls to symbolic values";
+  let description = [{
+    Replaces external `__circt_urandom_range` calls emitted by MooreToCore for
+    `$random`, `$urandom`, and `$urandom_range` with independent module-level
+    `verif.symbolic_value` sources. Optional inclusive unsigned range assumptions
+    stay at the original call sites; reversed endpoints are exchanged.
+
+    Preserves enclosing LLHD processes and control flow. Ignores seed inputs and
+    generator updates, including observable seed writebacks. This deliberately
+    loses reproducibility and PRNG correlations and is not generally a
+    conservative abstraction when the program observes a modified seed.
+
+    Accepts mixed HW/LLHD output before or after `comb-assume-two-valued`.
+    Calls that may repeat without an LLHD suspension must first be unrolled.
+    Does not perform LLHD lowering or change the default Verilog pipeline.
+  }];
+  let options = [Option<"assumeRanges", "assume-ranges", "bool", "true",
+                        "Constrain symbolic draws to their requested ranges">];
+  let dependentDialects = [
+    "comb::CombDialect", "hw::HWDialect", "verif::VerifDialect",
+  ];
+}
+
 def CombineAssertLikePass : Pass<"combine-assert-like"> {
   let summary = "Combines all assertions and assumptions into single operations";
   let description = [{

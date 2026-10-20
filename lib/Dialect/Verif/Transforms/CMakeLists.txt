@@ -1,4 +1,5 @@
 add_circt_dialect_library(CIRCTVerifTransforms
+  AbstractRandom.cpp
   CombineAssertLike.cpp
   FoldAssume.cpp
   LowerContracts.cpp
@@ -13,12 +14,16 @@ add_circt_dialect_library(CIRCTVerifTransforms
   CIRCTVerifTransformsIncGen
 
   LINK_LIBS PUBLIC
+  CIRCTComb
   CIRCTHW
+  CIRCTLLHD
   CIRCTLTL
   CIRCTSupport
   CIRCTSV
   CIRCTVerif
+  MLIRFuncDialect
   MLIRIR
+  MLIRLLVMDialect
   MLIRPass
   MLIRTransforms
   MLIRTransformUtils

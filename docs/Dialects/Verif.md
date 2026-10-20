@@ -4,6 +4,45 @@ This dialect provides a collection of operations to express various verification
 
 [TOC]
 
+## Abstracting SystemVerilog random calls
+
+`circt-opt --verif-abstract-random` replaces the external
+`__circt_urandom_range(i32, i32, !llvm.ptr) -> i32` calls emitted by MooreToCore
+for `$random`, `$urandom`, and `$urandom_range` with independent
+`verif.symbolic_value : i32` sources in the enclosing `hw.module`.
+
+```sh
+circt-verilog --ir-hw input.sv |
+  circt-opt --comb-assume-two-valued --verif-abstract-random
+```
+
+By default each bounded draw has an inclusive unsigned range assumption, with
+reversed endpoints exchanged. Assumptions remain at the original call sites:
+enclosing branches and LLHD processes preserve their execution conditions and
+sampling context. This pass does not extract guards or clocks, flatten control
+flow, or lower LLHD. Generated Comb operations are two-state, so the pass can run
+before or after `comb-assume-two-valued`.
+
+Use `--verif-abstract-random='assume-ranges=false'` to omit range assumptions.
+Full-width intervals need no assumption even when this option is enabled.
+Distinct calls, including already-unrolled iterations, get separate sources;
+multiple uses of one result share its source. Calls that can repeat without an
+LLHD suspension are rejected and must be unrolled first. Un-inlined functions
+and structured control flow must be lowered before running this pass.
+
+Seed inputs and generator updates are ignored. Dedicated seed temporaries and
+writebacks are removed, preserving pre-call seed values and ordinary assignments
+to seed variables. This loses deterministic replay, RNG state, and correlations
+between draws. In particular, suppressing `$random(seed)`'s observable seed
+update is intentional and is not generally a conservative abstraction of a
+program that reads the updated seed. Upstream currently represents both
+`$random`'s mutable seed and `$urandom`'s input-only seed using the same helper;
+this pass does not correct those importer semantics.
+
+The transformation is opt-in and independent of subsequent formal lowering.
+Unrelated calls and effects remain unchanged; unsupported helper signatures or
+escaping seed pointers cause a diagnostic before any calls are replaced.
+
 ## Contracts
 
 Formal contracts are a key building block of the Verif dialect to help make formal verification scale to larger designs and deep module hierarchies.
