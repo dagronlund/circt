@@ -1293,6 +1293,41 @@ LogicalResult lowerTimeData(ModuleOp module) {
   return success();
 }
 
+/// Select between updated elements instead of whole-array partial updates.
+/// This exposes complete injection chains across conditional loop iterations,
+/// allowing cleanup to remove their apparent dependence on the old array.
+struct FactorArrayUpdateMux : OpRewritePattern<comb::MuxOp> {
+  FactorArrayUpdateMux(MLIRContext *context, unsigned &budget, bool &exhausted)
+      : OpRewritePattern(context), budget(budget), exhausted(exhausted) {}
+
+  LogicalResult matchAndRewrite(comb::MuxOp op,
+                                PatternRewriter &rewriter) const override {
+    auto trueUpdate = op.getTrueValue().getDefiningOp<hw::ArrayInjectOp>();
+    auto falseUpdate = op.getFalseValue().getDefiningOp<hw::ArrayInjectOp>();
+    if (!trueUpdate || !falseUpdate ||
+        trueUpdate.getInput() != falseUpdate.getInput() ||
+        trueUpdate.getIndex() != falseUpdate.getIndex())
+      return failure();
+    if (budget < 2) {
+      exhausted = true;
+      return rewriter.notifyMatchFailure(op, "array update expansion limit");
+    }
+    budget -= 2;
+    IRMapping mapping;
+    mapping.map(op.getTrueValue(), trueUpdate.getElement());
+    mapping.map(op.getFalseValue(), falseUpdate.getElement());
+    // Retain the mux's twoState flag and attributes on the element selection.
+    auto *mux = rewriter.clone(*op, mapping);
+    mux->getResult(0).setType(trueUpdate.getElement().getType());
+    rewriter.replaceOpWithNewOp<hw::ArrayInjectOp>(
+        op, trueUpdate.getInput(), trueUpdate.getIndex(), mux->getResult(0));
+    return success();
+  }
+
+  unsigned &budget;
+  bool &exhausted;
+};
+
 /// Expose packed array lanes so truncations can discard unobserved storage
 /// after SROA reconstructs a probed aggregate from independently driven slices.
 struct FlattenPackedArrayCast : OpRewritePattern<hw::BitcastOp> {
@@ -1371,12 +1406,14 @@ struct DistributeExtractThroughOr : OpRewritePattern<comb::ExtractOp> {
 };
 
 LogicalResult normalizePackedSlices(ModuleOp module) {
-  // Bound expansion of aggregate casts and shared OR trees. Only expose lanes
-  // and push slices towards inputs; do not factor producers back out and
-  // oscillate. A separate cleanup folds the exposed zero-padded lanes.
+  // Bound expansion of conditional array updates, aggregate casts, and shared
+  // OR trees. Only expose packed lanes and push slices towards inputs; do not
+  // factor packed producers back out and oscillate. A separate cleanup folds
+  // complete array updates and the exposed zero-padded lanes.
   unsigned budget = 65536;
   bool exhausted = false;
   RewritePatternSet patterns(module.getContext());
+  patterns.add<FactorArrayUpdateMux>(module.getContext(), budget, exhausted);
   patterns.add<FlattenPackedArrayCast>(module.getContext(), budget, exhausted);
   patterns.add<DistributeExtractThroughOr>(module.getContext(), budget,
                                            exhausted);
