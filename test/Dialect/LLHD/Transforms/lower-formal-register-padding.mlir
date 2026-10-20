@@ -140,3 +140,39 @@ hw.module @enabled_whole_packed_drives(in %clk: !seq.clock, in %enable_low: i1, 
   llhd.drv %s, %high_reg after %time : i8
   hw.output %old : i8
 }
+
+// Neither outer array dimension has passthrough padding. Narrow through both
+// before recovering the packed lanes, preserving independent enables and attrs.
+// CHECK-LABEL: hw.module @nested_enabled_packed_drives
+// CHECK-DAG: [[LOW:%.+]] = seq.firreg [[LOW_NEXT:%.+]] clock %clk {test.tag = "low"} : i3
+// CHECK-DAG: [[LOW_NEXT]] = comb.mux bin %enable_low, %low, [[LOW]] : i3
+// CHECK-DAG: [[HIGH:%.+]] = seq.firreg [[HIGH_NEXT:%.+]] clock %clk {test.tag = "high"} : i5
+// CHECK-DAG: [[HIGH_NEXT]] = comb.mux %enable_high, %high, [[HIGH]] : i5
+// CHECK-DAG: [[WORD:%.+]] = comb.concat [[HIGH]], [[LOW]] : i5, i3
+// CHECK-DAG: [[INNER:%.+]] = hw.array_create [[WORD]] : i8
+// CHECK-DAG: [[OUTER:%.+]] = hw.array_create [[INNER]] : !hw.array<1xi8>
+// CHECK: hw.output [[OUTER]] : !hw.array<1xarray<1xi8>>
+hw.module @nested_enabled_packed_drives(in %clk: !seq.clock, in %enable_low: i1, in %enable_high: i1, in %low: i3, in %high: i5, out q: !hw.array<1xarray<1xi8>>) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [[0 : i8]] : !hw.array<1xarray<1xi8>>
+  %index = hw.constant 0 : i0
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.array<1xarray<1xi8>>
+  %old = llhd.prb %s : !hw.array<1xarray<1xi8>>
+  %inner = hw.array_get %old[%index] : !hw.array<1xarray<1xi8>>, i0
+  %word = hw.array_get %inner[%index] : !hw.array<1xi8>, i0
+  %old_low = comb.extract %word from 0 : (i8) -> i3
+  %old_high = comb.extract %word from 3 : (i8) -> i5
+  %low_word = comb.concat %old_high, %low : i5, i3
+  %high_word = comb.concat %high, %old_low : i5, i3
+  %low_inner = hw.array_create %low_word : i8
+  %high_inner = hw.array_create %high_word : i8
+  %low_update = hw.array_create %low_inner : !hw.array<1xi8>
+  %high_update = hw.array_create %high_inner : !hw.array<1xi8>
+  %low_next = comb.mux bin %enable_low, %low_update, %low_reg : !hw.array<1xarray<1xi8>>
+  %high_next = comb.mux %enable_high, %high_update, %high_reg : !hw.array<1xarray<1xi8>>
+  %low_reg = seq.firreg %low_next clock %clk {test.tag = "low"} : !hw.array<1xarray<1xi8>>
+  %high_reg = seq.firreg %high_next clock %clk {test.tag = "high"} : !hw.array<1xarray<1xi8>>
+  llhd.drv %s, %low_reg after %time : !hw.array<1xarray<1xi8>>
+  llhd.drv %s, %high_reg after %time : !hw.array<1xarray<1xi8>>
+  hw.output %old : !hw.array<1xarray<1xi8>>
+}

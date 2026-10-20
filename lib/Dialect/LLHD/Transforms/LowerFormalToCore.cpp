@@ -749,15 +749,69 @@ std::optional<uint64_t> getArrayLaneIndex(hw::ArrayGetOp slice) {
   return value;
 }
 
-/// Mem2Reg in the ordinary frontend pipeline can expand a partial array drive
-/// into an injection into a probe of the same signal. Recover the static target
-/// before SROA, even when dynamic reads require probing the whole array.
-void normalizeArrayDrives(ModuleOp module) {
+/// Mem2Reg in the ordinary frontend pipeline can expand a partial drive into
+/// an aggregate injection or packed concatenation using a probe of the same
+/// signal. Recover its static targets before SROA, retaining only actual
+/// writes.
+bool normalizePartialDrives(ModuleOp module) {
+  bool changed = false;
   SmallVector<DriveOp> drives;
   module.walk([&](DriveOp op) { drives.push_back(op); });
   for (auto drive : drives) {
     if (!isa<hw::HWModuleOp>(drive->getParentOp()))
       continue;
+    OpBuilder builder(drive);
+    auto cloneDrive = [&](Value target, Value value) {
+      IRMapping mapping;
+      mapping.map(drive.getSignal(), target);
+      mapping.map(drive.getValue(), value);
+      // Retain the drive's delay, enable, and attributes. Only the statically
+      // unchanged portions are removed from its target.
+      builder.clone(*drive, mapping);
+    };
+    if (auto inject = drive.getValue().getDefiningOp<hw::StructInjectOp>()) {
+      auto probe = inject.getInput().getDefiningOp<ProbeOp>();
+      if (!probe || probe.getSignal() != drive.getSignal())
+        continue;
+      Value target =
+          SigStructExtractOp::create(builder, drive.getLoc(), drive.getSignal(),
+                                     inject.getFieldNameAttr());
+      cloneDrive(target, inject.getNewValue());
+      drive.erase();
+      changed = true;
+      continue;
+    }
+    if (auto concat = drive.getValue().getDefiningOp<comb::ConcatOp>()) {
+      SmallVector<std::pair<Value, unsigned>> updates;
+      unsigned offset = 0;
+      bool hasPadding = false;
+      for (auto input : llvm::reverse(concat.getInputs())) {
+        auto extract = input.getDefiningOp<comb::ExtractOp>();
+        auto probe =
+            extract ? extract.getInput().getDefiningOp<ProbeOp>() : ProbeOp();
+        if (probe && probe.getSignal() == drive.getSignal() &&
+            extract.getLowBit() == offset)
+          hasPadding = true;
+        else
+          updates.emplace_back(input, offset);
+        offset += input.getType().getIntOrFloatBitWidth();
+      }
+      if (!hasPadding)
+        continue;
+      auto indexType =
+          builder.getIntegerType(std::max(1u, llvm::Log2_64_Ceil(offset)));
+      for (auto [value, low] : updates) {
+        Value index =
+            hw::ConstantOp::create(builder, drive.getLoc(), indexType, low);
+        Value target = SigExtractOp::create(builder, drive.getLoc(),
+                                            RefType::get(value.getType()),
+                                            drive.getSignal(), index);
+        cloneDrive(target, value);
+      }
+      drive.erase();
+      changed = true;
+      continue;
+    }
     auto inject = drive.getValue().getDefiningOp<hw::ArrayInjectOp>();
     if (!inject)
       continue;
@@ -771,17 +825,13 @@ void normalizeArrayDrives(ModuleOp module) {
             cast<hw::ArrayType>(inject.getInput().getType()).getNumElements())
       continue;
 
-    OpBuilder builder(drive);
     auto target = SigArrayGetOp::create(builder, drive.getLoc(),
                                         drive.getSignal(), inject.getIndex());
-    IRMapping mapping;
-    mapping.map(drive.getSignal(), target.getResult());
-    mapping.map(drive.getValue(), inject.getElement());
-    // Retain the drive's delay, enable, and attributes. Only the statically
-    // unchanged elements are removed from its target.
-    builder.clone(*drive, mapping);
+    cloneDrive(target, inject.getElement());
     drive.erase();
+    changed = true;
   }
+  return changed;
 }
 
 /// Find packed lane boundaries hidden by register extraction. Follow mux arms
@@ -882,8 +932,11 @@ void splitRegisterDrives(ModuleOp module) {
 /// when the register is only used to drive split signals, apart from an
 /// optional self-feedback enable mux. Discard only exact passthrough lanes with
 /// another driver. Reset, preset, symbolic, or independently observed register
-/// state must not be discarded.
-void normalizeRegisterDrives(ModuleOp module) {
+/// state must not be discarded. Narrow aggregate registers even without padding
+/// at this level, so subsequent iterations can expose padding in nested lanes.
+/// Return whether any registers were narrowed.
+bool normalizeRegisterDrives(ModuleOp module) {
+  bool changed = false;
   SmallVector<seq::FirRegOp> registers;
   module.walk([&](seq::FirRegOp op) { registers.push_back(op); });
   for (auto reg : registers) {
@@ -928,7 +981,7 @@ void normalizeRegisterDrives(ModuleOp module) {
       }
       slices.push_back(user);
     }
-    if (!supported)
+    if (!supported || slices.empty())
       continue;
     SmallVector<DriveOp> padding;
     for (auto *slice : slices) {
@@ -958,8 +1011,6 @@ void normalizeRegisterDrives(ModuleOp module) {
           padding.push_back(drive);
       }
     }
-    if (padding.empty())
-      continue;
     for (auto drive : padding)
       drive.erase();
     for (auto *slice : slices) {
@@ -998,7 +1049,9 @@ void normalizeRegisterDrives(ModuleOp module) {
       hold.erase();
     }
     reg.erase();
+    changed = true;
   }
+  return changed;
 }
 
 LogicalResult preflight(ModuleOp module, bool normalized = false,
@@ -1508,18 +1561,24 @@ struct LowerLLHDFormalToCorePass
     normalizeConstantInitialState(module);
     if (failed(normalizeInitialState(module)))
       return failure();
-    normalizeArrayDrives(module);
-    splitRegisterDrives(module);
     // Independent aggregate elements may have different drivers, including a
     // mix of combinational and clocked assignments. Split these before checking
     // driver ownership or promoting partial writes to whole-signal updates.
-    PassManager aggregates(&getContext());
-    aggregates.addNestedPass<hw::HWModuleOp>(createSROA());
-    if (failed(runPipeline(aggregates, module)) || failed(cleanup(module)))
-      return failure();
-    normalizeRegisterDrives(module);
-    if (failed(cleanup(module)))
-      return failure();
+    // Repeat after recovering partial drives or narrowing registers: aggregate
+    // elements can themselves contain independently driven packed lanes or
+    // nested aggregates. Each iteration reduces the width or aggregate depth.
+    bool changed;
+    do {
+      changed = normalizePartialDrives(module);
+      splitRegisterDrives(module);
+      PassManager aggregates(&getContext());
+      aggregates.addNestedPass<hw::HWModuleOp>(createSROA());
+      if (failed(runPipeline(aggregates, module)) || failed(cleanup(module)))
+        return failure();
+      changed |= normalizeRegisterDrives(module);
+      if (failed(cleanup(module)))
+        return failure();
+    } while (changed);
     if (failed(preflight(module, false, true)))
       return failure();
     if (failed(lowerTimeData(module)))
