@@ -1637,6 +1637,33 @@ struct LowerLLHDFormalToCorePass
     normalizeConstantInitialState(module);
     if (failed(normalizeInitialState(module)))
       return failure();
+    // Recognize already promoted processes before running Mem2Reg again. A
+    // projected current clock may be defined before the wait after ordinary
+    // cleanup; recapturing it would turn it into another past clock sample.
+    // This also exposes static partial drives hidden in dual-edge array results
+    // before SROA and driver validation.
+    SmallVector<ProcessOp> promoted;
+    module.walk([&](ProcessOp op) { promoted.push_back(op); });
+    for (auto process : promoted) {
+      // Leave effect-only processes and unsupported aggregate state to the
+      // usual normalization and diagnostics below.
+      if (!process.getNumResults() ||
+          !llvm::all_of(process->getUsers(), [&](Operation *user) {
+            auto drive = dyn_cast<DriveOp>(user);
+            if (!drive)
+              return false;
+            auto type = drive.getValue().getType();
+            if (isa<IntegerType>(type))
+              return true;
+            auto array = dyn_cast<hw::ArrayType>(type);
+            auto signal = drive.getSignal().getDefiningOp<SignalOp>();
+            return array && isa<IntegerType>(array.getElementType()) &&
+                   signal && signal->hasAttr("llhd.unconstrained");
+          }))
+        continue;
+      if (failed(deseqFormal(process)))
+        return failure();
+    }
     // Independent aggregate elements may have different drivers, including a
     // mix of combinational and clocked assignments. Split these before checking
     // driver ownership or promoting partial writes to whole-signal updates.

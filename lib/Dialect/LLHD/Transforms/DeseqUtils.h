@@ -264,6 +264,9 @@ struct DriveInfo {
   /// The optional reset that triggers a change of the driven value to a fixed
   /// reset value. Null if no reset was detected.
   ResetInfo reset;
+  /// A static array element updated by an otherwise whole-array dual-edge
+  /// drive. The other elements are unchanged probes of the driven signal.
+  IntegerAttr arrayIndex;
 
   DriveInfo() {}
   explicit DriveInfo(DriveOp op) : op(op) {}
