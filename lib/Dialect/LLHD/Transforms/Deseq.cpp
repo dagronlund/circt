@@ -1150,6 +1150,38 @@ bool Deseq::matchDrive(DriveInfo &drive) {
       valueTable.push_back({orTerm, value});
   }
 
+  // Ordinary promotion can hide a partial dual-edge write inside a process
+  // result carrying an entire array. Recover a common static element from the
+  // enabled updates, without treating the probed padding as additional state.
+  // Aggregate initial state is not supported by this recovery.
+  if (formal && triggers.size() == 1 && valueTable.size() == 2) {
+    auto arrayType = dyn_cast<hw::ArrayType>(drive.op.getValue().getType());
+    auto signal = drive.op.getSignal().getDefiningOp<SignalOp>();
+    if (arrayType && isa<IntegerType>(arrayType.getElementType()) && signal &&
+        signal->hasAttr("llhd.unconstrained")) {
+      IntegerAttr commonIndex;
+      bool partial = llvm::all_of(
+          valueTable, [&](const std::pair<DNFTerm, ValueEntry> &entry) {
+            if (entry.second.isUnknown())
+              return false;
+            auto inject = entry.second.value.getDefiningOp<hw::ArrayInjectOp>();
+            auto probe =
+                inject ? inject.getInput().getDefiningOp<ProbeOp>() : ProbeOp();
+            IntegerAttr index;
+            if (!probe || probe.getSignal() != drive.op.getSignal() ||
+                !matchPattern(inject.getIndex(), m_Constant(&index)) ||
+                index.getValue().getActiveBits() > 64 ||
+                index.getValue().getZExtValue() >= arrayType.getNumElements() ||
+                (commonIndex && index != commonIndex))
+              return false;
+            commonIndex = index;
+            return true;
+          });
+      if (partial)
+        drive.arrayIndex = commonIndex;
+    }
+  }
+
   // At this point we should have at most three entries in the value table,
   // corresponding to the reset, clock, and clock under reset. Everything else
   // we have no chance of representing as a register op.
@@ -1176,7 +1208,7 @@ bool Deseq::matchDriveClock(
   // Require precisely the rising and falling transitions of one clock; level
   // sensitivity and unrelated clocks must not be represented this way.
   if (formal && valueTable.size() == 2 && !wait.getDelay() &&
-      isa<IntegerType>(drive.op.getValue().getType())) {
+      (isa<IntegerType>(drive.op.getValue().getType()) || drive.arrayIndex)) {
     bool rising = false, falling = false, enabled = false;
     for (auto &entry : valueTable) {
       auto condition = entry.first;
@@ -1631,7 +1663,13 @@ void Deseq::implementDualEdgeRegister(DriveInfo &drive) {
       materializeProjection(builder, loc, drive.clock.clock, rematerialized);
   auto clock = builder.createOrFold<seq::ToClockOp>(loc, clockValue);
   auto inverted = seq::ClockInverterOp::create(builder, loc, clock);
-  auto type = cast<IntegerType>(drive.op.getValue().getType());
+  auto type = cast<IntegerType>(
+      drive.arrayIndex
+          ? cast<hw::ArrayType>(drive.op.getValue().getType()).getElementType()
+          : drive.op.getValue().getType());
+  Value index;
+  if (drive.arrayIndex)
+    index = hw::ConstantOp::create(builder, loc, drive.arrayIndex);
   auto zeroAttr = builder.getIntegerAttr(type, 0);
   auto zero = hw::ConstantOp::create(builder, loc, zeroAttr);
   IntegerAttr preset;
@@ -1652,6 +1690,8 @@ void Deseq::implementDualEdgeRegister(DriveInfo &drive) {
   for (bool isRising : {true, false}) {
     FixedValues edge{{drive.clock.clock, !isRising, isRising}};
     Value value = specializeValue(drive.clock.value, edge);
+    if (index)
+      value = hw::ArrayGetOp::create(builder, loc, value, index);
     Value next = builder.createOrFold<comb::XorOp>(
         loc, value, isRising ? falling.getResult() : rising.getResult());
     auto reg = isRising ? rising : falling;
@@ -1665,6 +1705,9 @@ void Deseq::implementDualEdgeRegister(DriveInfo &drive) {
   drive.op.getValueMutable().assign(builder.createOrFold<comb::XorOp>(
       loc, rising.getResult(), falling.getResult()));
   drive.op.getEnableMutable().clear();
+  if (index)
+    drive.op.getSignalMutable().assign(
+        SigArrayGetOp::create(builder, loc, drive.op.getSignal(), index));
   TimeAttr time;
   if (matchPattern(drive.op.getTime(), m_Constant(&time)) &&
       time.getTime() == 0 && time.getDelta() == 1 && time.getEpsilon() == 0) {
