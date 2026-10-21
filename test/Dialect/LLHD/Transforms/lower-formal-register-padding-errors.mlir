@@ -148,3 +148,38 @@ hw.module @observed_enabled_next(in %clk: !seq.clock, in %en: i1, in %a: i3, in 
   llhd.drv %s, %reg after %time : !hw.array<2xi3>
   hw.output %next : !hw.array<2xi3>
 }
+
+// -----
+
+// An update to a struct field in either mux arm is a genuine overlapping write.
+hw.module @changed_struct_field(in %clk: !seq.clock, in %sel: i1, in %a: i3, in %b: i3) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [0 : i3, 0 : i3] : !hw.struct<low: i3, high: i3>
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.struct<low: i3, high: i3>
+  %low = llhd.sig.struct_extract %s["low"] : !llhd.ref<!hw.struct<low: i3, high: i3>>
+  llhd.drv %low, %a after %time : i3
+  %value = llhd.prb %s : !hw.struct<low: i3, high: i3>
+  %other = hw.struct_inject %value["low"], %b : !hw.struct<low: i3, high: i3>
+  %next = comb.mux %sel, %value, %other : !hw.struct<low: i3, high: i3>
+  %reg = seq.firreg %next clock %clk : !hw.struct<low: i3, high: i3>
+  llhd.drv %s, %reg after %time : !hw.struct<low: i3, high: i3>
+  hw.output
+}
+
+// -----
+
+// Resetting the struct writes even the field whose next value passes through.
+hw.module @reset_struct_field(in %clk: !seq.clock, in %rst: i1, in %a: i3, in %b: i5) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [0 : i3, 0 : i5] : !hw.struct<low: i3, high: i5>
+  // expected-error @+1 {{signal must have exactly one resolved driver}}
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.struct<low: i3, high: i5>
+  %low = llhd.sig.struct_extract %s["low"] : !llhd.ref<!hw.struct<low: i3, high: i5>>
+  llhd.drv %low, %a after %time : i3
+  %value = llhd.prb %s : !hw.struct<low: i3, high: i5>
+  %next = hw.struct_inject %value["high"], %b : !hw.struct<low: i3, high: i5>
+  %reg = seq.firreg %next clock %clk reset async %rst, %zero : !hw.struct<low: i3, high: i5>
+  llhd.drv %s, %reg after %time : !hw.struct<low: i3, high: i5>
+  hw.output
+}
