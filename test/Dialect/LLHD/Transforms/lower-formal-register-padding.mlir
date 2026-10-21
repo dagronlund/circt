@@ -176,3 +176,46 @@ hw.module @nested_enabled_packed_drives(in %clk: !seq.clock, in %enable_low: i1,
   llhd.drv %s, %high_reg after %time : !hw.array<1xarray<1xi8>>
   hw.output %old : !hw.array<1xarray<1xi8>>
 }
+
+// Struct fields can contain passthrough padding on both arms of a mux. Recover
+// the updated field through both construction and injection, retaining attrs.
+// CHECK-LABEL: hw.module @struct_padding
+// CHECK: [[NEXT:%.+]] = comb.mux %sel, %a, %b {test.tag = "mux"} : i5
+// CHECK: [[Q:%.+]] = seq.firreg [[NEXT]] clock %clk {test.tag = "state"} : i5
+// CHECK-NEXT: hw.output [[Q]] : i5
+hw.module @struct_padding(in %clk: !seq.clock, in %sel: i1, in %low: i3, in %a: i5, in %b: i5, out q: i5) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [0 : i3, 0 : i5] : !hw.struct<low: i3, high: i5>
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.struct<low: i3, high: i5>
+  %low_ref = llhd.sig.struct_extract %s["low"] : !llhd.ref<!hw.struct<low: i3, high: i5>>
+  llhd.drv %low_ref, %low after %time : i3
+  %value = llhd.prb %s : !hw.struct<low: i3, high: i5>
+  %old_low = hw.struct_extract %value["low"] : !hw.struct<low: i3, high: i5>
+  %a_next = hw.struct_create (%old_low, %a) : !hw.struct<low: i3, high: i5>
+  %b_next = hw.struct_inject %value["high"], %b : !hw.struct<low: i3, high: i5>
+  %next = comb.mux %sel, %a_next, %b_next {test.tag = "mux"} : !hw.struct<low: i3, high: i5>
+  %reg = seq.firreg %next clock %clk {test.tag = "state"} : !hw.struct<low: i3, high: i5>
+  llhd.drv %s, %reg after %time : !hw.struct<low: i3, high: i5>
+  %q = hw.struct_extract %value["high"] : !hw.struct<low: i3, high: i5>
+  hw.output %q : i5
+}
+
+// Project struct register feedback and preserve the hold polarity and attrs.
+// CHECK-LABEL: hw.module @enabled_struct_padding
+// CHECK: [[Q:%.+]] = seq.firreg [[NEXT:%.+]] clock %clk {test.tag = "state"} : i5
+// CHECK-NEXT: [[NEXT]] = comb.mux bin %hold, [[Q]], %high {test.tag = "hold"} : i5
+// CHECK-NEXT: hw.output [[Q]] : i5
+hw.module @enabled_struct_padding(in %clk: !seq.clock, in %hold: i1, in %low: i3, in %high: i5, out q: i5) {
+  %time = llhd.constant_time <0ns, 0d, 1e>
+  %zero = hw.aggregate_constant [0 : i3, 0 : i5] : !hw.struct<low: i3, high: i5>
+  %s = llhd.sig %zero {llhd.unconstrained} : !hw.struct<low: i3, high: i5>
+  %low_ref = llhd.sig.struct_extract %s["low"] : !llhd.ref<!hw.struct<low: i3, high: i5>>
+  llhd.drv %low_ref, %low after %time : i3
+  %value = llhd.prb %s : !hw.struct<low: i3, high: i5>
+  %update = hw.struct_inject %value["high"], %high : !hw.struct<low: i3, high: i5>
+  %next = comb.mux bin %hold, %reg, %update {test.tag = "hold"} : !hw.struct<low: i3, high: i5>
+  %reg = seq.firreg %next clock %clk {test.tag = "state"} : !hw.struct<low: i3, high: i5>
+  llhd.drv %s, %reg after %time : !hw.struct<low: i3, high: i5>
+  %q = hw.struct_extract %value["high"] : !hw.struct<low: i3, high: i5>
+  hw.output %q : i5
+}
