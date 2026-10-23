@@ -22,6 +22,7 @@ add_circt_dialect_library(CIRCTLLHDTransforms
   CIRCTLTL
   CIRCTSeq
   CIRCTSim
+  CIRCTTransforms
   CIRCTVerif
   MLIRAnalysis
   MLIRArithDialect

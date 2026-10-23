@@ -102,6 +102,7 @@ struct Loop {
       : loopId(loopId), cfgLoop(cfgLoop), formal(formal) {}
   bool failMatch(const Twine &msg) const;
   bool match();
+  bool matchBound(Value condition);
   void unroll(CFGLoopInfo &cfgLoopInfo);
 
   /// A numeric identifier for debugging purposes.
@@ -113,6 +114,8 @@ struct Loop {
   BlockOperand *exitEdge = nullptr;
   /// Whether the loop has exits besides the statically bounded exit.
   bool hasEarlyExits = false;
+  /// Whether the full condition may exit before the selected static bound.
+  bool preserveCondition = false;
   /// The SSA value holding the exit condition.
   Value exitCondition;
   /// Whether the exit condition is inverted, i.e. the contination condition.
@@ -192,9 +195,35 @@ bool Loop::match() {
   exitCondition = exitBranch.getCondition();
   exitInverted = exitEdge->getOperandNumber() == 1;
 
+  // A conjunct of the continuation condition can bound the whole loop even
+  // when the other conjuncts stop it earlier. Dually, a disjunct of an exit
+  // condition can force termination. Keep the complete condition in each
+  // cloned iteration instead of assuming the selected bound is sufficient to
+  // continue. Only the final iteration is known to exit unconditionally.
+  SmallSetVector<Value, 8> conditions;
+  conditions.insert(exitCondition);
+  for (unsigned i = 0; i < conditions.size(); ++i) {
+    Value condition = conditions[i];
+    auto *op = condition.getDefiningOp();
+    if (formal && op &&
+        ((exitInverted && isa<comb::AndOp>(op)) ||
+         (!exitInverted && isa<comb::OrOp>(op)))) {
+      conditions.insert(op->operand_begin(), op->operand_end());
+      continue;
+    }
+    if (matchBound(condition)) {
+      preserveCondition = condition != exitCondition;
+      return true;
+    }
+  }
+  return failMatch("no supported static loop bound");
+}
+
+/// Match one comparison that guarantees termination of the loop.
+bool Loop::matchBound(Value condition) {
   // Determine one of the loop bounds and the induction variable based on the
   // exit condition.
-  if (auto icmpOp = exitCondition.getDefiningOp<comb::ICmpOp>()) {
+  if (auto icmpOp = condition.getDefiningOp<comb::ICmpOp>()) {
     IntegerAttr boundAttr;
     if (!matchPattern(icmpOp.getRhs(), m_Constant(&boundAttr)))
       return failMatch("non-constant loop bound");
@@ -407,7 +436,8 @@ static LogicalResult closeLoopValues(CFGLoop &loop) {
 void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
   LLVM_DEBUG(llvm::dbgs() << "- Unrolling loop " << *this << "\n");
   UnusedOpPruner pruner;
-  if (hasEarlyExits && failed(closeLoopValues(cfgLoop))) {
+  if ((hasEarlyExits || preserveCondition) &&
+      failed(closeLoopValues(cfgLoop))) {
     failMatch("cannot forward values outside loop");
     return;
   }
@@ -451,21 +481,24 @@ void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
       if (blockOperand.get() == clonedHeader)
         blockOperand.set(header);
 
-    // Remove the bounded exit in the cloned body, since this iteration is
-    // within the bound. Preserve any early exits and their conditions.
-    auto exitBranchOp =
-        cast<cf::CondBranchOp>(mapper.lookup(exitEdge->getOwner()));
-    Block *continueDest = exitBranchOp.getTrueDest();
-    ValueRange continueDestOperands = exitBranchOp.getTrueDestOperands();
-    if (exitEdge->getOperandNumber() == 0) {
-      continueDest = exitBranchOp.getFalseDest();
-      continueDestOperands = exitBranchOp.getFalseDestOperands();
+    // A compound condition can stop before the selected bound, so preserve it
+    // in every executing iteration. Otherwise this bounded exit is known not
+    // to be taken. Other early exits remain conditional in either case.
+    if (!preserveCondition) {
+      auto exitBranchOp =
+          cast<cf::CondBranchOp>(mapper.lookup(exitEdge->getOwner()));
+      Block *continueDest = exitBranchOp.getTrueDest();
+      ValueRange continueDestOperands = exitBranchOp.getTrueDestOperands();
+      if (exitEdge->getOperandNumber() == 0) {
+        continueDest = exitBranchOp.getFalseDest();
+        continueDestOperands = exitBranchOp.getFalseDestOperands();
+      }
+      builder.setInsertionPoint(exitBranchOp);
+      cf::BranchOp::create(builder, exitBranchOp.getLoc(), continueDest,
+                           continueDestOperands);
+      pruner.eraseLaterIfUnused(exitBranchOp.getOperands());
+      exitBranchOp.erase();
     }
-    builder.setInsertionPoint(exitBranchOp);
-    cf::BranchOp::create(builder, exitBranchOp.getLoc(), continueDest,
-                         continueDestOperands);
-    pruner.eraseLaterIfUnused(exitBranchOp.getOperands());
-    exitBranchOp.erase();
 
     // Add the new blocks to the loop body.
     for (auto *block : orderedBody) {

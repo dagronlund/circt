@@ -14,7 +14,7 @@
 #include "circt/Dialect/LTL/LTLOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/Sim/SimOps.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "circt/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/IRMapping.h"
@@ -1855,32 +1855,15 @@ struct LowerLLHDFormalToCorePass
         return failure();
     if (failed(cleanup(module)))
       return failure();
-    // Region simplification may materialize constants and selections with
-    // Arith. Normalize those implementation artifacts before enforcing dialect
-    // purity.
-    SmallVector<arith::ConstantOp> constants;
-    module.walk([&](arith::ConstantOp op) { constants.push_back(op); });
-    for (auto op : constants) {
-      auto value = dyn_cast<IntegerAttr>(op.getValue());
-      if (!value)
-        return op.emitError(
-            "only integer constants are supported in formal hardware");
-      OpBuilder builder(op);
-      auto core = hw::ConstantOp::create(builder, op.getLoc(), value);
-      op.replaceAllUsesWith(core.getResult());
-      op.erase();
-    }
-    SmallVector<arith::SelectOp> selects;
-    module.walk([&](arith::SelectOp op) { selects.push_back(op); });
-    for (auto op : selects) {
-      if (!isa<IntegerType>(op.getType()))
-        continue;
-      OpBuilder builder(op);
-      auto mux = comb::MuxOp::create(builder, op.getLoc(), op.getCondition(),
-                                     op.getTrueValue(), op.getFalseValue());
-      op.replaceAllUsesWith(mux.getResult());
-      op.erase();
-    }
+    // Region simplification materializes Arith selections and constants, and
+    // canonicalization can turn these into extensions or Boolean arithmetic.
+    // Map all supported artifacts to hardware before enforcing dialect purity;
+    // leave unsupported operations for the strict final legality check.
+    PassManager arithmetic(&getContext());
+    arithmetic.addPass(
+        circt::createMapArithToCombPass(/*enableBestEffortLowering=*/true));
+    if (failed(runPipeline(arithmetic, module)))
+      return failure();
     if (failed(normalizePackedSlices(module)) || failed(cleanup(module)))
       return failure();
     return verifyCore(module);

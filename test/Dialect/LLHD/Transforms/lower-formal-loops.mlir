@@ -107,3 +107,98 @@ hw.module @zero_trip_early_exit(in %stop: i1, in %x: i8, out y: i8) {
   }
   hw.output %y : i8
 }
+
+// Selecting the looser bound must not discard the tighter conjunct. Values
+// used at the shared exit must come from the iteration that actually stopped.
+// CHECK-LABEL: hw.module @compound_bound
+// CHECK: [[THREE:%.+]] = hw.constant 3 : i8
+// CHECK: [[RESULT:%.+]] = comb.add %x, [[THREE]] : i8
+// CHECK-NEXT: hw.output [[RESULT]] : i8
+// SIM-LABEL: hw.module @compound_bound
+// SIM: comb.and
+// SIM: cf.cond_br
+hw.module @compound_bound(in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i3
+  %one = hw.constant 1 : i3
+  %loose = hw.constant 4 : i3
+  %tight = hw.constant 3 : i3
+  %increment = hw.constant 1 : i8
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero, %x : i3, i8)
+  ^header(%i: i3, %value: i8):
+    %a = comb.icmp ult %i, %loose : i3
+    %b = comb.icmp ult %i, %tight : i3
+    %continue = comb.and %a, %b : i1
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next_value = comb.add %value, %increment : i8
+    %next_i = comb.add %i, %one : i3
+    cf.br ^header(%next_i, %next_value : i3, i8)
+  ^exit:
+    llhd.yield %value : i8
+  }
+  hw.output %y : i8
+}
+
+// The first conjunct is dynamic. The static comparison still bounds the loop,
+// but the guard can skip all iterations and must retain the initial value.
+// CHECK-LABEL: hw.module @guarded_bound
+// CHECK: [[TWO:%.+]] = hw.constant 2 : i8
+// CHECK: [[NEXT:%.+]] = comb.add %x, [[TWO]] : i8
+// CHECK: [[RESULT:%.+]] = comb.mux %guard, [[NEXT]], %x : i8
+// CHECK-NEXT: hw.output [[RESULT]] : i8
+// SIM-LABEL: hw.module @guarded_bound
+// SIM: comb.and
+// SIM: cf.cond_br
+hw.module @guarded_bound(in %guard: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  %increment = hw.constant 1 : i8
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero, %x : i2, i8)
+  ^header(%i: i2, %value: i8):
+    %bounded = comb.icmp ult %i, %bound : i2
+    %continue = comb.and %guard, %bounded : i1
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next_value = comb.add %value, %increment : i8
+    %next_i = comb.add %i, %one : i2
+    cf.br ^header(%next_i, %next_value : i2, i8)
+  ^exit:
+    llhd.yield %value : i8
+  }
+  hw.output %y : i8
+}
+
+// The dual form branches to the exit when either a guard or the bound fires.
+// CHECK-LABEL: hw.module @compound_exit
+// CHECK-DAG: [[TWO:%.+]] = hw.constant 2 : i8
+// CHECK-DAG: [[TRUE:%.+]] = hw.constant true
+// CHECK: [[CONTINUE:%.+]] = comb.xor %stop, [[TRUE]] : i1
+// CHECK: [[NEXT:%.+]] = comb.add %x, [[TWO]] : i8
+// CHECK: [[RESULT:%.+]] = comb.mux [[CONTINUE]], [[NEXT]], %x : i8
+// CHECK-NEXT: hw.output [[RESULT]] : i8
+// SIM-LABEL: hw.module @compound_exit
+// SIM: comb.or
+// SIM: cf.cond_br
+hw.module @compound_exit(in %stop: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  %increment = hw.constant 1 : i8
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero, %x : i2, i8)
+  ^header(%i: i2, %value: i8):
+    %bounded = comb.icmp uge %i, %bound : i2
+    %exit = comb.or %stop, %bounded : i1
+    cf.cond_br %exit, ^done, ^body
+  ^body:
+    %next_value = comb.add %value, %increment : i8
+    %next_i = comb.add %i, %one : i2
+    cf.br ^header(%next_i, %next_value : i2, i8)
+  ^done:
+    llhd.yield %value : i8
+  }
+  hw.output %y : i8
+}

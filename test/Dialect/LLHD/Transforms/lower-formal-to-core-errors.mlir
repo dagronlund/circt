@@ -300,3 +300,36 @@ hw.module @combinational_multidriver(in %sel: i1, in %a: i1, in %b: i1) {
   }
   hw.output
 }
+
+// -----
+
+// Best-effort Arith normalization must retain the strict final legality check.
+hw.module @unsupported_arithmetic(in %x: i8, in %divisor: i8, out y: i8) {
+  // expected-error @+1 {{operation remains after strict formal lowering; unsupported arith.ceildivsi}}
+  %y = arith.ceildivsi %x, %divisor : i8
+  hw.output %y : i8
+}
+
+// -----
+
+// A comparison in a continuation disjunction does not bound the loop: the
+// dynamic guard can keep it running after the counter reaches that bound.
+hw.module @unbounded_disjunction(in %guard: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero : i2)
+  ^header(%i: i2):
+    %bounded = comb.icmp ult %i, %bound : i2
+    %continue = comb.or %guard, %bounded : i1
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next_i = comb.add %i, %one : i2
+    cf.br ^header(%next_i : i2)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
