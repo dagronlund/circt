@@ -1072,6 +1072,81 @@ bool normalizeRegisterDrives(ModuleOp module) {
   return changed;
 }
 
+/// Hierarchical reads are represented by reference ports in the frontend.
+/// Materialize the signal's value at each boundary so local state can be
+/// promoted without changing ownership of its driver. Only read-only ports
+/// can be converted this way; a cross-module write needs alias resolution.
+LogicalResult normalizeReferencePorts(ModuleOp module) {
+  SmallVector<hw::HWModuleOp> modules;
+  SmallVector<hw::InstanceOp> instances;
+  DenseSet<Value> references;
+  for (auto moduleOp : module.getOps<hw::HWModuleOp>()) {
+    modules.push_back(moduleOp);
+    for (auto arg : moduleOp.getBodyBlock()->getArguments())
+      if (isa<RefType>(arg.getType()))
+        references.insert(arg);
+  }
+  module.walk([&](hw::InstanceOp instance) {
+    if (!SymbolTable::lookupNearestSymbolFrom<hw::HWModuleOp>(
+            instance, instance.getModuleNameAttr()))
+      return;
+    instances.push_back(instance);
+    for (auto result : instance.getResults())
+      if (isa<RefType>(result.getType()))
+        references.insert(result);
+  });
+
+  SmallVector<ProbeOp> probes;
+  for (auto reference : references) {
+    for (auto *user : reference.getUsers()) {
+      if (auto probe = dyn_cast<ProbeOp>(user)) {
+        probes.push_back(probe);
+        continue;
+      }
+      if (isa<hw::OutputOp>(user))
+        continue;
+      if (auto instance = dyn_cast<hw::InstanceOp>(user))
+        if (SymbolTable::lookupNearestSymbolFrom<hw::HWModuleOp>(
+                instance, instance.getModuleNameAttr()))
+          continue;
+      return user->emitError(
+          "reference ports may only be read or forwarded in formal lowering");
+    }
+  }
+
+  // Update boundary values, signatures and their users together. No pipeline
+  // runs while the identity probes are temporarily ill-typed, and failures are
+  // confined to the formal pass's transaction clone.
+  for (auto reference : references)
+    reference.setType(cast<RefType>(reference.getType()).getNestedType());
+  auto readReference = [](OpOperand &operand) {
+    if (!isa<RefType>(operand.get().getType()))
+      return;
+    OpBuilder builder(operand.getOwner());
+    operand.set(
+        ProbeOp::create(builder, operand.getOwner()->getLoc(), operand.get()));
+  };
+  for (auto instance : instances)
+    for (auto &operand : instance->getOpOperands())
+      readReference(operand);
+  for (auto moduleOp : modules) {
+    for (auto &operand :
+         moduleOp.getBodyBlock()->getTerminator()->getOpOperands())
+      readReference(operand);
+    SmallVector<hw::ModulePort> ports(moduleOp.getHWModuleType().getPorts());
+    for (auto &port : ports)
+      if (port.dir != hw::ModulePort::InOut)
+        if (auto reference = dyn_cast<RefType>(port.type))
+          port.type = reference.getNestedType();
+    moduleOp.setHWModuleType(hw::ModuleType::get(module.getContext(), ports));
+  }
+  for (auto probe : probes) {
+    probe.replaceAllUsesWith(probe->getOperand(0));
+    probe.erase();
+  }
+  return success();
+}
+
 LogicalResult preflight(ModuleOp module, bool normalized = false,
                         bool allowUndriven = false) {
   auto result = module.walk([&](Operation *op) -> WalkResult {
@@ -1628,6 +1703,8 @@ struct LowerLLHDFormalToCorePass
   LogicalResult lower(ModuleOp module) {
     if (!maxMonitorDepth)
       return module.emitError("max-monitor-depth must be positive");
+    if (failed(normalizeReferencePorts(module)))
+      return failure();
     lowerFormalDiagnostics(module);
     // Resolve static procedural loops before SROA and driver validation. Their
     // induction variables may select independently driven packed slices.
