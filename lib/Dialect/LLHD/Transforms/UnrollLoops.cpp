@@ -109,8 +109,10 @@ struct Loop {
   /// Loop analysis information about this specific loop.
   CFGLoop &cfgLoop;
   bool formal;
-  /// The CFG edge exiting the loop.
+  /// The CFG edge exiting the loop at its static bound.
   BlockOperand *exitEdge = nullptr;
+  /// Whether the loop has exits besides the statically bounded exit.
+  bool hasEarlyExits = false;
   /// The SSA value holding the exit condition.
   Value exitCondition;
   /// Whether the exit condition is inverted, i.e. the contination condition.
@@ -128,7 +130,7 @@ struct Loop {
   APInt beginBound;
   /// The final value for the induction variable.
   APInt endBound;
-  /// The number of iterations of the loop.
+  /// The number of iterations before the static bound (excluding early exits).
   unsigned tripCount = 0;
 };
 } // namespace
@@ -158,15 +160,30 @@ bool Loop::match() {
         if (isa<WaitOp, HaltOp>(op))
           return failMatch("loop suspends execution");
 
-  // Ensure that there is a unique exit point and condition for the loop.
+  // Find the statically bounded exit. Formal loops may also have early exits
+  // (e.g. SystemVerilog break statements), which must remain conditional in
+  // each unrolled iteration. Require the bounded exit to be in the header in
+  // that case, so it bounds every path through the loop.
   SmallVector<BlockOperand *> exits;
   for (auto *block : cfgLoop.getBlocks())
     for (auto &edge : block->getTerminator()->getBlockOperands())
       if (!cfgLoop.contains(edge.get()))
         exits.push_back(&edge);
-  if (exits.size() != 1)
-    return failMatch("multiple exits");
-  exitEdge = exits.back();
+  if (exits.size() == 1) {
+    exitEdge = exits.back();
+  } else {
+    if (!formal || exits.empty())
+      return failMatch("multiple exits");
+    for (auto *edge : exits)
+      if (edge->getOwner()->getBlock() == cfgLoop.getHeader()) {
+        if (exitEdge)
+          return failMatch("multiple header exits");
+        exitEdge = edge;
+      }
+    if (!exitEdge)
+      return failMatch("no bounded header exit");
+    hasEarlyExits = true;
+  }
 
   // The terminator doing the exit must be a conditional branch.
   auto exitBranch = dyn_cast<cf::CondBranchOp>(exitEdge->getOwner());
@@ -325,11 +342,75 @@ bool Loop::match() {
   return true;
 }
 
+/// Forward values defined in the loop through block arguments outside it.
+/// Early-exit blocks need the values from the iteration that took the exit,
+/// rather than values defined in the final, non-executing loop header.
+static LogicalResult closeLoopValues(CFGLoop &loop) {
+  auto &region = *loop.getHeader()->getParent();
+  SmallVector<Value> values;
+  for (auto &block : region) {
+    if (!loop.contains(&block))
+      continue;
+    llvm::append_range(values, block.getArguments());
+    for (auto &op : block)
+      llvm::append_range(values, op.getResults());
+  }
+
+  SmallVector<std::pair<Value, SmallSetVector<Block *, 8>>> escaping;
+  for (auto value : values) {
+    SmallSetVector<Block *, 8> blocks;
+    for (auto &use : value.getUses()) {
+      auto *block =
+          region.findAncestorBlockInRegion(*use.getOwner()->getBlock());
+      if (block && !loop.contains(block))
+        blocks.insert(block);
+    }
+    // Walk backwards to the loop, including intermediate blocks and cycles.
+    for (unsigned i = 0; i < blocks.size(); ++i)
+      for (auto *pred : blocks[i]->getPredecessors())
+        if (!loop.contains(pred))
+          blocks.insert(pred);
+
+    // Check all required edges before modifying any blocks. Process exits may
+    // suspend execution instead of using an extensible branch interface.
+    for (auto *block : blocks)
+      for (auto &edge : block->getUses())
+        if (!isa<BranchOpInterface>(edge.getOwner()))
+          return failure();
+    if (!blocks.empty())
+      escaping.emplace_back(value, std::move(blocks));
+  }
+
+  for (auto &[value, blocks] : escaping) {
+    DenseMap<Block *, BlockArgument> arguments;
+    for (auto *block : blocks)
+      arguments[block] = block->addArgument(value.getType(), value.getLoc());
+    for (auto &use : llvm::make_early_inc_range(value.getUses())) {
+      auto *block =
+          region.findAncestorBlockInRegion(*use.getOwner()->getBlock());
+      if (auto arg = arguments.lookup(block))
+        use.set(arg);
+    }
+    for (auto *block : blocks)
+      for (auto &edge : block->getUses()) {
+        auto branch = cast<BranchOpInterface>(edge.getOwner());
+        Value incoming = arguments.lookup(branch->getBlock());
+        branch.getSuccessorOperands(edge.getOperandNumber())
+            .append(incoming ? incoming : value);
+      }
+  }
+  return success();
+}
+
 /// Unroll the loop by cloning its body blocks and replacing the induction
 /// variable with constant iteration indices.
 void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
   LLVM_DEBUG(llvm::dbgs() << "- Unrolling loop " << *this << "\n");
   UnusedOpPruner pruner;
+  if (hasEarlyExits && failed(closeLoopValues(cfgLoop))) {
+    failMatch("cannot forward values outside loop");
+    return;
+  }
 
   // Sort the blocks in the body. This is not strictly necessary, but makes the
   // pass a lot easier to reason about in tests.
@@ -370,8 +451,8 @@ void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
       if (blockOperand.get() == clonedHeader)
         blockOperand.set(header);
 
-    // Remove the exit edge in the cloned body, since we statically know that
-    // the loop will continue.
+    // Remove the bounded exit in the cloned body, since this iteration is
+    // within the bound. Preserve any early exits and their conditions.
     auto exitBranchOp =
         cast<cf::CondBranchOp>(mapper.lookup(exitEdge->getOwner()));
     Block *continueDest = exitBranchOp.getTrueDest();
