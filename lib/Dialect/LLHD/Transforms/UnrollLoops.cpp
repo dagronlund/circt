@@ -96,13 +96,61 @@ static void cloneBlocks(ArrayRef<Block *> blocks, Region &region,
 //===----------------------------------------------------------------------===//
 
 namespace {
+/// Evaluate integer Comb expressions for concrete header argument values. Use
+/// the operations' own folders so extensions, comparisons and arithmetic retain
+/// their actual fixed-width semantics. Folding a clone keeps recognition from
+/// mutating the user's IR when an operation only supports in-place folding.
+struct StaticLoopEvaluator {
+  StaticLoopEvaluator(Block::BlockArgListType arguments,
+                      ArrayRef<IntegerAttr> values) {
+    for (auto [arg, value] : llvm::zip(arguments, values))
+      cache[arg] = value;
+  }
+
+  IntegerAttr evaluate(Value value) {
+    auto [it, inserted] = cache.try_emplace(value, IntegerAttr{});
+    if (!inserted)
+      return it->second;
+    if (cache.size() > 256 || !isa<IntegerType>(value.getType()))
+      return {};
+    IntegerAttr constant;
+    if (matchPattern(value, m_Constant(&constant)))
+      return cache[value] = constant;
+    auto *op = value.getDefiningOp();
+    if (!op || op->getName().getDialectNamespace() != "comb" ||
+        op->getNumResults() != 1 || op->getNumRegions())
+      return {};
+    SmallVector<Attribute> operands;
+    for (auto operand : op->getOperands()) {
+      auto attr = evaluate(operand);
+      if (!attr)
+        return {};
+      operands.push_back(attr);
+    }
+    auto *copy = op->clone();
+    SmallVector<OpFoldResult> results;
+    IntegerAttr result;
+    if (succeeded(copy->fold(operands, results)) && results.size() == 1) {
+      if (auto attr = dyn_cast<Attribute>(results.front()))
+        result = dyn_cast<IntegerAttr>(attr);
+      else if (auto operand = dyn_cast<Value>(results.front()))
+        result = cache.lookup(operand);
+    }
+    copy->destroy();
+    return cache[value] = result;
+  }
+
+  DenseMap<Value, IntegerAttr> cache;
+};
+
 /// A data structure tracking information on a single loop.
 struct Loop {
   Loop(unsigned loopId, CFGLoop &cfgLoop, bool formal)
       : loopId(loopId), cfgLoop(cfgLoop), formal(formal) {}
   bool failMatch(const Twine &msg) const;
-  bool match();
+  bool match(DominanceInfo &domInfo);
   bool matchBound(Value condition);
+  bool matchFormalBound(Value condition);
   void unroll(CFGLoopInfo &cfgLoopInfo);
 
   /// A numeric identifier for debugging purposes.
@@ -131,6 +179,8 @@ struct Loop {
   APInt beginBound;
   /// The final value for the induction variable.
   APInt endBound;
+  /// Concrete header counter values, including the final exiting iteration.
+  SmallVector<APInt> indVarValues;
   /// The number of iterations before the static bound (excluding early exits).
   unsigned tripCount = 0;
 };
@@ -156,7 +206,7 @@ bool Loop::failMatch(const Twine &msg) const {
 
 /// Check that the loop matches the specific pattern we understand, and extract
 /// the loop condition and induction variable.
-bool Loop::match() {
+bool Loop::match(DominanceInfo &domInfo) {
   // Formal process loops must execute entirely within one sampling step.
   if (formal)
     for (auto *block : cfgLoop.getBlocks())
@@ -164,60 +214,140 @@ bool Loop::match() {
         if (isa<WaitOp, HaltOp>(op))
           return failMatch("loop suspends execution");
 
-  // Find the statically bounded exit. Formal loops may also have early exits
-  // (e.g. SystemVerilog break statements), which must remain conditional in
-  // each unrolled iteration. Require the bounded exit to be in the header in
-  // that case, so it bounds every path through the loop.
+  // A statically bounded exit must be encountered before every back-edge.
+  // Besides header-tested loops this includes do/while latch tests, even when
+  // another path exits early through a break.
   SmallVector<BlockOperand *> exits;
   for (auto *block : cfgLoop.getBlocks())
     for (auto &edge : block->getTerminator()->getBlockOperands())
       if (!cfgLoop.contains(edge.get()))
         exits.push_back(&edge);
-  if (exits.size() == 1) {
-    exitEdge = exits.back();
-  } else {
-    if (!formal || exits.empty())
-      return failMatch("multiple exits");
-    for (auto *edge : exits)
-      if (edge->getOwner()->getBlock() == cfgLoop.getHeader()) {
-        if (exitEdge)
-          return failMatch("multiple header exits");
-        exitEdge = edge;
-      }
-    if (!exitEdge)
-      return failMatch("no bounded header exit");
-    hasEarlyExits = true;
-  }
-
-  // The terminator doing the exit must be a conditional branch.
-  auto exitBranch = dyn_cast<cf::CondBranchOp>(exitEdge->getOwner());
-  if (!exitBranch)
-    return failMatch("unsupported exit branch");
-  exitCondition = exitBranch.getCondition();
-  exitInverted = exitEdge->getOperandNumber() == 1;
-
-  // A conjunct of the continuation condition can bound the whole loop even
-  // when the other conjuncts stop it earlier. Dually, a disjunct of an exit
-  // condition can force termination. Keep the complete condition in each
-  // cloned iteration instead of assuming the selected bound is sufficient to
-  // continue. Only the final iteration is known to exit unconditionally.
-  SmallSetVector<Value, 8> conditions;
-  conditions.insert(exitCondition);
-  for (unsigned i = 0; i < conditions.size(); ++i) {
-    Value condition = conditions[i];
-    auto *op = condition.getDefiningOp();
-    if (formal && op &&
-        ((exitInverted && isa<comb::AndOp>(op)) ||
-         (!exitInverted && isa<comb::OrOp>(op)))) {
-      conditions.insert(op->operand_begin(), op->operand_end());
+  if (!formal && exits.size() != 1)
+    return failMatch("multiple exits");
+  SmallVector<Block *> latches;
+  cfgLoop.getLoopLatches(latches);
+  for (auto *edge : exits) {
+    auto exitBranch = dyn_cast<cf::CondBranchOp>(edge->getOwner());
+    if (!exitBranch)
       continue;
-    }
-    if (matchBound(condition)) {
-      preserveCondition = condition != exitCondition;
-      return true;
+    if (formal && !llvm::all_of(latches, [&](Block *latch) {
+          return domInfo.dominates(exitBranch->getBlock(), latch);
+        }))
+      continue;
+    exitEdge = edge;
+    hasEarlyExits = exits.size() != 1;
+    exitCondition = exitBranch.getCondition();
+    exitInverted = exitEdge->getOperandNumber() == 1;
+
+    // A conjunct can bound a continuation condition with dynamic guards.
+    // Dually, a disjunct can force an exit. Preserve the complete condition
+    // in cloned iterations when only one part supplies the static bound.
+    SmallSetVector<Value, 8> conditions;
+    conditions.insert(exitCondition);
+    for (unsigned i = 0; i < conditions.size(); ++i) {
+      Value condition = conditions[i];
+      auto *op = condition.getDefiningOp();
+      if (formal && op &&
+          ((exitInverted && isa<comb::AndOp>(op)) ||
+           (!exitInverted && isa<comb::OrOp>(op)))) {
+        conditions.insert(op->operand_begin(), op->operand_end());
+        continue;
+      }
+      if (formal ? matchFormalBound(condition) : matchBound(condition)) {
+        preserveCondition = condition != exitCondition;
+        return true;
+      }
     }
   }
   return failMatch("no supported static loop bound");
+}
+
+/// Prove termination by evaluating statically known header recurrences and the
+/// exit condition. Unknown or path-dependent values cannot establish a bound.
+/// Repeated states and sequences exceeding the expansion limit are rejected.
+bool Loop::matchFormalBound(Value condition) {
+  auto *header = cfgLoop.getHeader();
+  SmallVector<IntegerAttr> initial(header->getNumArguments());
+  SmallVector<SmallVector<Value>> updates(header->getNumArguments());
+  for (auto counter : header->getArguments()) {
+    if (!isa<IntegerType>(counter.getType()))
+      continue;
+    auto index = counter.getArgNumber();
+    bool valid = true;
+    for (auto &edge : header->getUses()) {
+      auto branch = dyn_cast<BranchOpInterface>(edge.getOwner());
+      if (!branch)
+        return failMatch("unsupported branch to loop header");
+      auto incoming =
+          branch.getSuccessorOperands(edge.getOperandNumber())[index];
+      if (cfgLoop.contains(branch->getBlock())) {
+        updates[index].push_back(incoming);
+        continue;
+      }
+      IntegerAttr constant;
+      if (!matchPattern(incoming, m_Constant(&constant)) ||
+          (initial[index] && initial[index] != constant))
+        valid = false;
+      else
+        initial[index] = constant;
+    }
+    if (!valid || updates[index].empty())
+      initial[index] = {};
+  }
+
+  // Track all statically known header arguments together: conditions can use
+  // more than one counter, such as i < j with i++ and j--. Data-dependent
+  // accumulators become unknown without preventing evaluation of the counters.
+  SmallDenseSet<APInt, 16> seen;
+  SmallVector<SmallVector<IntegerAttr>> states;
+  auto current = initial;
+  for (unsigned iteration = 0; iteration < 1024; ++iteration) {
+    APInt state(1, 0);
+    for (auto [arg, value] : llvm::zip(header->getArguments(), current))
+      if (auto type = dyn_cast<IntegerType>(arg.getType())) {
+        state =
+            state.concat(value ? value.getValue() : APInt(type.getWidth(), 0));
+        state = state.concat(APInt(1, bool(value)));
+      }
+    if (!seen.insert(state).second)
+      break;
+    StaticLoopEvaluator evaluator(header->getArguments(), current);
+    auto test = evaluator.evaluate(condition);
+    if (!test)
+      break;
+    states.push_back(current);
+    if (test.getValue().isZero() == exitInverted) {
+      // One concrete counter is sufficient for the unroller. Other statically
+      // known arguments still flow through the cloned blocks normally.
+      for (auto counter : header->getArguments()) {
+        auto index = counter.getArgNumber();
+        if (!llvm::all_of(states, [&](const auto &values) {
+              return bool(values[index]);
+            }))
+          continue;
+        indVar = counter;
+        beginBound = initial[index].getValue();
+        tripCount = states.size() - 1;
+        for (const auto &values : states)
+          indVarValues.push_back(values[index].getValue());
+        return true;
+      }
+      break;
+    }
+    for (auto [index, incoming] : llvm::enumerate(updates)) {
+      IntegerAttr next;
+      for (auto update : incoming) {
+        auto value = evaluator.evaluate(update);
+        if (!value || (next && next != value)) {
+          next = {};
+          break;
+        }
+        next = value;
+      }
+      current[index] = next;
+    }
+  }
+  return failMatch("counter recurrence is not statically bounded");
 }
 
 /// Match one comparison that guarantees termination of the loop.
@@ -231,20 +361,6 @@ bool Loop::matchBound(Value condition) {
     indVar = icmpOp.getLhs();
     predicate = icmpOp.getPredicate();
     endBound = boundAttr.getValue();
-    // SystemVerilog widens small unsigned loop counters to the width of an
-    // unsized bound. Look through that extension only when the bound fits the
-    // counter, so the comparison has exactly the same meaning at either width.
-    if (formal && predicate == comb::ICmpPredicate::ult)
-      if (auto concat = indVar.getDefiningOp<comb::ConcatOp>();
-          concat && concat.getNumOperands() == 2 &&
-          matchPattern(concat.getOperand(0), m_Zero())) {
-        auto counter = concat.getOperand(1);
-        unsigned width = counter.getType().getIntOrFloatBitWidth();
-        if (endBound.getActiveBits() <= width) {
-          indVar = counter;
-          endBound = endBound.trunc(width);
-        }
-      }
   } else {
     return failMatch("unsupported exit condition");
   }
@@ -303,41 +419,6 @@ bool Loop::matchBound(Value condition) {
   if (!increment)
     return failMatch("no induction variable increment");
   indVarIncrement = *increment;
-
-  // Count formal iterations at the counter's actual width. Mathematical range
-  // arithmetic can incorrectly terminate loops whose fixed-width counter wraps.
-  if (formal) {
-    auto value = beginBound;
-    for (tripCount = 0; tripCount < 1024; ++tripCount) {
-      bool continues;
-      switch (predicate) {
-      case comb::ICmpPredicate::ult:
-        continues = value.ult(endBound);
-        break;
-      case comb::ICmpPredicate::slt:
-        continues = value.slt(endBound);
-        break;
-      case comb::ICmpPredicate::sgt:
-        continues = value.sgt(endBound);
-        break;
-      case comb::ICmpPredicate::eq:
-        continues = value == endBound;
-        break;
-      default:
-        return failMatch("unsupported loop bounds");
-      }
-      if (!continues)
-        return true;
-      bool overflow;
-      value = predicate == comb::ICmpPredicate::ult ||
-                      predicate == comb::ICmpPredicate::eq
-                  ? value.uadd_ov(indVarIncrement, overflow)
-                  : value.sadd_ov(indVarIncrement, overflow);
-      if (overflow)
-        return failMatch("induction variable wraps");
-    }
-    return failMatch("unsupported loop bounds");
-  }
 
   std::optional<unsigned> range;
   // Determine the trip count and loop behavior.
@@ -523,7 +604,10 @@ void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
     }
 
     // Increment the induction variable value.
-    indValue += indVarIncrement;
+    if (formal)
+      indValue = indVarValues[trip + 1];
+    else
+      indValue += indVarIncrement;
   }
 
   // Now that the loop body has been cloned once for each trip throughout the
@@ -645,7 +729,7 @@ bool LoopUnroller::unrollLoops(Region &region) {
   DominanceInfo domInfo(region.getParentOp());
   CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&region));
 
-  // Formal loops may have multiple back-edges with the same counter increment.
+  // Formal loops may have multiple back-edges with the same counter recurrence.
   // Each latch block must still belong to a single loop header. Create a
   // data structure for each loop we can potentially unroll. The loops are in
   // preorder, with outer loops appearing before their child loops.
@@ -688,7 +772,7 @@ bool LoopUnroller::unrollLoops(Region &region) {
     }
 
     // Check if the loop body matches the pattern we can unroll.
-    if (loop.match()) {
+    if (loop.match(domInfo)) {
       loops.push_back(std::move(loop));
       continue;
     }
@@ -719,8 +803,11 @@ bool LoopUnroller::unrollLoops(Region &region) {
       os << "\n";
       os << "  - Induction variable: ";
       loop.indVar.printAsOperand(os, OpPrintingFlags().useLocalScope());
-      os << ", from " << loop.beginBound << ", while " << loop.predicate << " "
-         << loop.endBound << ", increment " << loop.indVarIncrement << "\n";
+      os << ", from " << loop.beginBound;
+      if (!loop.formal)
+        os << ", while " << loop.predicate << " " << loop.endBound
+           << ", increment " << loop.indVarIncrement;
+      os << "\n";
       os << "  - Trip count: " << loop.tripCount << "\n";
     }
   });
