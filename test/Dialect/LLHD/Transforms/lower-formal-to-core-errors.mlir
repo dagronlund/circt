@@ -333,3 +333,50 @@ hw.module @unbounded_disjunction(in %guard: i1, in %x: i8, out y: i8) {
   }
   hw.output %y : i8
 }
+
+// -----
+
+// Different increments on the back-edges cannot be treated as a fixed trip
+// count. In particular, repeatedly taking the +2 edge wraps the i2 counter.
+hw.module @path_dependent_increment(in %choose: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %two = hw.constant 2 : i2
+  %bound = hw.constant 3 : i2
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero : i2)
+  ^header(%i: i2):
+    %continue = comb.icmp ult %i, %bound : i2
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next_one = comb.add %i, %one : i2
+    %next_two = comb.add %i, %two : i2
+    cf.cond_br %choose, ^header(%next_one : i2), ^header(%next_two : i2)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
+
+// -----
+
+// A back-edge which skips the increment can keep the loop running forever.
+hw.module @skipped_increment(in %choose: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero : i2)
+  ^header(%i: i2):
+    %continue = comb.icmp ult %i, %bound : i2
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next_i = comb.add %i, %one : i2
+    cf.cond_br %choose, ^header(%next_i : i2), ^header(%i : i2)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
