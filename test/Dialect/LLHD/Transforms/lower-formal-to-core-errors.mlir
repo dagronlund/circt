@@ -380,3 +380,115 @@ hw.module @skipped_increment(in %choose: i1, in %x: i8, out y: i8) {
   }
   hw.output %y : i8
 }
+
+// -----
+
+// An even counter cannot reach an odd inequality bound.
+hw.module @unreachable_inequality(in %x: i8, out y: i8) {
+  %initial = hw.constant 0 : i3
+  %bound = hw.constant 3 : i3
+  %step = hw.constant 2 : i3
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%initial : i3)
+  ^header(%i: i3):
+    %continue = comb.icmp ne %i, %bound : i3
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next = comb.add %i, %step : i3
+    cf.br ^header(%next : i3)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
+
+// -----
+
+// Multiplication wraps to zero and then stays there forever.
+hw.module @nonlinear_cycle(in %x: i8, out y: i8) {
+  %initial = hw.constant 1 : i3
+  %bound = hw.constant 7 : i3
+  %step = hw.constant 2 : i3
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%initial : i3)
+  ^header(%i: i3):
+    %continue = comb.icmp ult %i, %bound : i3
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next = comb.mul %i, %step : i3
+    cf.br ^header(%next : i3)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
+
+// -----
+
+// A latch comparison cannot bound a path which bypasses that latch entirely.
+hw.module @bypassed_bound(in %choose: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i3
+  %one = hw.constant 1 : i3
+  %bound = hw.constant 4 : i3
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero : i3)
+  ^header(%i: i3):
+    %next = comb.add %i, %one : i3
+    cf.cond_br %choose, ^header(%next : i3), ^latch
+  ^latch:
+    %continue = comb.icmp ult %next, %bound : i3
+    cf.cond_br %continue, ^header(%next : i3), ^exit
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
+
+// -----
+
+// Division by zero has no concrete counter value.
+hw.module @unknown_division_update(in %x: i8, out y: i8) {
+  %initial = hw.constant 1 : i32
+  %bound = hw.constant 4 : i32
+  %zero = hw.constant 0 : i32
+  %one = hw.constant 1 : i32
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%initial : i32)
+  ^header(%i: i32):
+    %continue = comb.icmp ult %i, %bound : i32
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next = comb.divu %i, %zero : i32
+    cf.br ^header(%next : i32)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
+
+// -----
+
+// A finite recurrence must still obey the unrolling expansion limit.
+hw.module @loop_expansion_limit(in %x: i8, out y: i8) {
+  %initial = hw.constant 0 : i32
+  %bound = hw.constant 1024 : i32
+  %zero = hw.constant 0 : i32
+  %one = hw.constant 1 : i32
+  // expected-error @+1 {{unsupported control-flow cycle or effect}}
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%initial : i32)
+  ^header(%i: i32):
+    %continue = comb.icmp ult %i, %bound : i32
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next = comb.add %i, %one : i32
+    cf.br ^header(%next : i32)
+  ^exit:
+    llhd.yield %x : i8
+  }
+  hw.output %y : i8
+}
