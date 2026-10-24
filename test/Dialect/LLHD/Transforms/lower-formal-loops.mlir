@@ -202,3 +202,105 @@ hw.module @compound_exit(in %stop: i1, in %x: i8, out y: i8) {
   }
   hw.output %y : i8
 }
+
+// Two latch blocks may compute equivalent increments with different SSA
+// values. Loop-carried data still differs between the paths.
+// CHECK-LABEL: hw.module @multiple_latches
+// CHECK: [[ONE:%.+]] = hw.constant 1 : i8
+// CHECK: [[FIRST:%.+]] = comb.add %x, [[ONE]] : i8
+// CHECK: [[CARRY:%.+]] = comb.mux %choose, [[FIRST]], %x : i8
+// CHECK: [[SECOND:%.+]] = comb.add [[CARRY]], [[ONE]] : i8
+// CHECK: [[RESULT:%.+]] = comb.mux %choose, [[SECOND]], %x : i8
+// CHECK-NEXT: hw.output [[RESULT]] : i8
+// SIM-LABEL: hw.module @multiple_latches
+// SIM: cf.cond_br
+hw.module @multiple_latches(in %choose: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  %increment = hw.constant 1 : i8
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero, %x : i2, i8)
+  ^header(%i: i2, %value: i8):
+    %continue = comb.icmp ult %i, %bound : i2
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next_i = comb.add %i, %one : i2
+    cf.cond_br %choose, ^update, ^header(%next_i, %value : i2, i8)
+  ^update:
+    %other_next_i = comb.add %i, %one : i2
+    %next_value = comb.add %value, %increment : i8
+    cf.br ^header(%other_next_i, %next_value : i2, i8)
+  ^exit:
+    llhd.yield %value : i8
+  }
+  hw.output %y : i8
+}
+
+// Parallel back-edges from the same terminator must both lead to the next
+// iteration, with their own argument lists intact.
+// CHECK-LABEL: hw.module @parallel_backedges
+// CHECK: [[ONE:%.+]] = hw.constant 1 : i8
+// CHECK: [[FIRST:%.+]] = comb.add %x, [[ONE]] : i8
+// CHECK: [[CARRY:%.+]] = comb.mux %choose, [[FIRST]], %x : i8
+// CHECK: [[SECOND:%.+]] = comb.add [[CARRY]], [[ONE]] : i8
+// CHECK: [[RESULT:%.+]] = comb.mux %choose, [[SECOND]], %x : i8
+// CHECK-NEXT: hw.output [[RESULT]] : i8
+// SIM-LABEL: hw.module @parallel_backedges
+// SIM: cf.cond_br
+hw.module @parallel_backedges(in %choose: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  %increment = hw.constant 1 : i8
+  %y = llhd.combinational -> i8 {
+    cf.br ^header(%zero, %x : i2, i8)
+  ^header(%i: i2, %value: i8):
+    %continue = comb.icmp ult %i, %bound : i2
+    cf.cond_br %continue, ^body, ^exit
+  ^body:
+    %next_i = comb.add %i, %one : i2
+    %next_value = comb.add %value, %increment : i8
+    cf.cond_br %choose, ^header(%next_i, %next_value : i2, i8), ^header(%next_i, %value : i2, i8)
+  ^exit:
+    llhd.yield %value : i8
+  }
+  hw.output %y : i8
+}
+
+// Recomputing the outer loop's body after unrolling the inner loop must retain
+// all of its newly cloned back-edge paths.
+// CHECK-LABEL: hw.module @nested_multiple_latches
+// CHECK: [[FOUR:%.+]] = hw.constant 4 : i8
+// CHECK: [[RESULT:%.+]] = comb.add %x, [[FOUR]] : i8
+// CHECK-NEXT: hw.output [[RESULT]] : i8
+// SIM-LABEL: hw.module @nested_multiple_latches
+// SIM: cf.cond_br
+hw.module @nested_multiple_latches(in %choose: i1, in %x: i8, out y: i8) {
+  %zero = hw.constant 0 : i2
+  %one = hw.constant 1 : i2
+  %bound = hw.constant 2 : i2
+  %increment = hw.constant 1 : i8
+  %y = llhd.combinational -> i8 {
+    cf.br ^outer(%zero, %x : i2, i8)
+  ^outer(%i: i2, %value: i8):
+    %outer_continue = comb.icmp ult %i, %bound : i2
+    cf.cond_br %outer_continue, ^inner(%zero, %value : i2, i8), ^exit
+  ^inner(%j: i2, %inner_value: i8):
+    %inner_continue = comb.icmp ult %j, %bound : i2
+    cf.cond_br %inner_continue, ^body, ^inner_exit
+  ^body:
+    %next_j = comb.add %j, %one : i2
+    %next_value = comb.add %inner_value, %increment : i8
+    cf.cond_br %choose, ^inner(%next_j, %next_value : i2, i8), ^other_latch
+  ^other_latch:
+    %other_next_j = comb.add %j, %one : i2
+    cf.br ^inner(%other_next_j, %next_value : i2, i8)
+  ^inner_exit:
+    %next_i = comb.add %i, %one : i2
+    cf.br ^outer(%next_i, %inner_value : i2, i8)
+  ^exit:
+    llhd.yield %value : i8
+  }
+  hw.output %y : i8
+}

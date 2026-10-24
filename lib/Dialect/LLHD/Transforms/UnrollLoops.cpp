@@ -122,8 +122,6 @@ struct Loop {
   bool exitInverted;
   /// The induction variable.
   Value indVar;
-  /// The updated induction variable passed into the next loop iteration.
-  Value indVarNext;
   /// The continuation predicate. The loop continues until the induction
   /// variable compared against the end bound no longer matches this predicate.
   comb::ICmpPredicate predicate;
@@ -142,7 +140,10 @@ static llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const Loop &loop) {
   os << "#" << loop.loopId << " from ";
   loop.cfgLoop.getHeader()->printAsOperand(os);
   os << " to ";
-  loop.cfgLoop.getLoopLatch()->printAsOperand(os);
+  SmallVector<Block *> latches;
+  loop.cfgLoop.getLoopLatches(latches);
+  llvm::interleaveComma(latches, os,
+                        [&](Block *latch) { latch->printAsOperand(os); });
   return os;
 }
 
@@ -255,11 +256,11 @@ bool Loop::matchBound(Value condition) {
 
   // Determine the initial and next value of the induction variable.
   auto *header = cfgLoop.getHeader();
-  auto *latch = cfgLoop.getLoopLatch();
   auto indVarArg = dyn_cast<BlockArgument>(indVar);
   if (!indVarArg || indVarArg.getOwner() != header)
     return failMatch("induction variable is not a header block argument");
   IntegerAttr beginBoundAttr;
+  SmallVector<Value> nextValues;
   for (auto &pred : header->getUses()) {
     auto branchOp = dyn_cast<BranchOpInterface>(pred.getOwner());
     if (!branchOp)
@@ -267,8 +268,8 @@ bool Loop::matchBound(Value condition) {
     auto indVarValue = branchOp.getSuccessorOperands(
         pred.getOperandNumber())[indVarArg.getArgNumber()];
     IntegerAttr boundAttr;
-    if (pred.getOwner()->getBlock() == latch) {
-      indVarNext = indVarValue;
+    if (cfgLoop.contains(pred.getOwner()->getBlock())) {
+      nextValues.push_back(indVarValue);
     } else if (matchPattern(indVarValue, m_Constant(&boundAttr))) {
       if (!beginBoundAttr)
         beginBoundAttr = boundAttr;
@@ -282,18 +283,26 @@ bool Loop::matchBound(Value condition) {
     return failMatch("no initial bound");
   beginBound = beginBoundAttr.getValue();
 
-  // Pattern match the increment operation on the induction variable.
-  if (auto addOp = indVarNext.getDefiningOp<comb::AddOp>();
-      addOp && addOp.getNumOperands() == 2) {
+  // Every back edge must advance the induction variable by the same constant.
+  // Cleanup may share the increment across conditional paths and branch back
+  // to the header separately with different loop-carried data values.
+  std::optional<APInt> increment;
+  for (auto nextValue : nextValues) {
+    auto addOp = nextValue.getDefiningOp<comb::AddOp>();
+    if (!addOp || addOp.getNumOperands() != 2)
+      return failMatch("unsupported increment");
     if (addOp.getOperand(0) != indVarArg)
       return failMatch("increment LHS not the induction variable");
     IntegerAttr incAttr;
     if (!matchPattern(addOp.getOperand(1), m_Constant(&incAttr)))
       return failMatch("increment RHS non-constant");
-    indVarIncrement = incAttr.getValue();
-  } else {
-    return failMatch("unsupported increment");
+    if (increment && *increment != incAttr.getValue())
+      return failMatch("inconsistent increments across back edges");
+    increment = incAttr.getValue();
   }
+  if (!increment)
+    return failMatch("no induction variable increment");
+  indVarIncrement = *increment;
 
   // Count formal iterations at the counter's actual width. Mathematical range
   // arithmetic can incorrectly terminate loops whose fixed-width counter wraps.
@@ -446,12 +455,16 @@ void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
   // pass a lot easier to reason about in tests.
   auto *header = cfgLoop.getHeader();
   SmallVector<Block *> orderedBody;
+  SmallPtrSet<Block *, 8> originalBlocks;
   for (auto &block : *header->getParent())
-    if (cfgLoop.contains(&block))
+    if (cfgLoop.contains(&block)) {
       orderedBody.push_back(&block);
+      originalBlocks.insert(&block);
+    }
 
   // Copy the loop body for every iteration of the loop.
-  auto *latch = cfgLoop.getLoopLatch();
+  SmallVector<Block *> latches;
+  cfgLoop.getLoopLatches(latches);
   OpBuilder builder(indVar.getContext());
   auto indValue = beginBound;
   for (unsigned trip = 0; trip < tripCount; ++trip) {
@@ -460,7 +473,6 @@ void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
     cloneBlocks(orderedBody, *header->getParent(), header->getIterator(),
                 mapper);
     auto *clonedHeader = mapper.lookup(header);
-    auto *clonedTail = mapper.lookup(latch);
 
     // Replace the induction variable with the concrete value.
     auto iterIndVar = mapper.lookup(indVar);
@@ -470,16 +482,20 @@ void Loop::unroll(CFGLoopInfo &cfgLoopInfo) {
         hw::ConstantOp::create(builder, iterIndVar.getLoc(), indValue));
 
     // Update all edges to the original loop header to point to the cloned loop
-    // header. Leave the original back-edge untouched.
+    // header. Leave every original back-edge untouched. Previously cloned
+    // back-edges now lead to this iteration even though those blocks have
+    // already been added to the loop analysis.
     for (auto &blockOperand : llvm::make_early_inc_range(header->getUses()))
-      if (blockOperand.getOwner()->getBlock() != latch)
+      if (!originalBlocks.contains(blockOperand.getOwner()->getBlock()))
         blockOperand.set(clonedHeader);
 
-    // Update the back-edge in the cloned latch to point to the original loop
-    // header, i.e. the next iteration, instead of the cloned loop header.
-    for (auto &blockOperand : clonedTail->getTerminator()->getBlockOperands())
-      if (blockOperand.get() == clonedHeader)
-        blockOperand.set(header);
+    // Update all cloned back-edges to point to the original loop header,
+    // i.e. the next iteration, instead of the cloned loop header.
+    for (auto *latch : latches)
+      for (auto &blockOperand :
+           mapper.lookup(latch)->getTerminator()->getBlockOperands())
+        if (blockOperand.get() == clonedHeader)
+          blockOperand.set(header);
 
     // A compound condition can stop before the selected bound, so preserve it
     // in every executing iteration. Otherwise this bounded exit is known not
@@ -629,18 +645,16 @@ bool LoopUnroller::unrollLoops(Region &region) {
   DominanceInfo domInfo(region.getParentOp());
   CFGLoopInfo cfgLoopInfo(domInfo.getDomTree(&region));
 
-  // We only support simple loops where there is a single back-edge to the
-  // header, and the latch block has a back-edge to a single header. Create a
+  // Formal loops may have multiple back-edges with the same counter increment.
+  // Each latch block must still belong to a single loop header. Create a
   // data structure for each loop we can potentially unroll. The loops are in
   // preorder, with outer loops appearing before their child loops.
   SmallVector<Loop> loops;
   bool retry = false;
   for (auto *cfgLoop : cfgLoopInfo.getLoopsInPreorder()) {
-    // To simplify unrolling we need a unique latch block branching back to the
-    // header.
+    // Keep the ordinary unroller's single-latch matching rules.
     auto *header = cfgLoop->getHeader();
-    auto *latch = cfgLoop->getLoopLatch();
-    if (!latch)
+    if (!formal && !cfgLoop->getLoopLatch())
       continue;
 
     LLVM_DEBUG({
@@ -660,12 +674,15 @@ bool LoopUnroller::unrollLoops(Region &region) {
       continue;
     }
 
-    // Ensure that the latch block is only a latch for the current loop. This
-    // simplifies unrolling.
-    parent = cfgLoop->getParentLoop();
-    while (parent && !parent->isLoopLatch(latch))
-      parent = parent->getParentLoop();
-    if (parent) {
+    // Ensure that no latch is shared with an enclosing loop.
+    SmallVector<Block *> latches;
+    cfgLoop->getLoopLatches(latches);
+    if (llvm::any_of(latches, [&](Block *latch) {
+          auto *parent = cfgLoop->getParentLoop();
+          while (parent && !parent->isLoopLatch(latch))
+            parent = parent->getParentLoop();
+          return parent != nullptr;
+        })) {
       loop.failMatch("latch block shared across multiple loops");
       continue;
     }
